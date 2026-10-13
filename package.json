@@ -1,0 +1,27 @@
+{
+  "name": "hulpdienst-materiaalbeheer-nijlen",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:db": "node --test tests/database.test.mjs",
+    "test:browser": "playwright test",
+    "check": "npm run test && npm run build",
+    "serve": "python3 -m http.server 8000 --directory dist"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.99.3",
+    "html5-qrcode": "2.3.8",
+    "jsbarcode": "3.12.1",
+    "qrcode": "1.5.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2",
+    "esbuild": "0.25.12",
+    "pg": "8.16.3",
+    "prettier": "3.6.2",
+    "supabase": "2.120.0"
+  }
+}
