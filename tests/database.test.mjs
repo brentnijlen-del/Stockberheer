@@ -1147,6 +1147,233 @@ test("an unrelated Auth invite created after reservation cannot be rebound or re
   );
 });
 
+async function setRole(actor, target, role, expected) {
+  return (
+    await asUser(
+      actor,
+      "select public.material_set_member_role($1,$2,$3) as result",
+      [target, role, expected],
+    )
+  )[0].result;
+}
+
+test("role selection is admin-only, safe to retry and preserves Auth/inventory with an auditable before/after", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const migration = await readFile(
+    new URL(
+      "../supabase/migrations/20261013181457_member_role_management.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const before = await snapshot();
+  const auth = (await pool.query("select * from auth.users order by id")).rows;
+  const members = (
+    await pool.query("select * from material_private.members order by user_id")
+  ).rows;
+  await pool.query(migration);
+  await pool.query(migration);
+  assert.deepEqual(
+    (
+      await pool.query(
+        "select * from material_private.members order by user_id",
+      )
+    ).rows,
+    members,
+  );
+  for (const actor of ["anon", "nonmember", "volunteer"])
+    await assert.rejects(
+      setRole(actor, IDS.volunteer, "admin", "volunteer"),
+      (e) => e.code === "42501",
+    );
+  for (const [role, expected] of [
+    [null, "volunteer"],
+    ["owner", "volunteer"],
+    ["admin", null],
+  ])
+    await assert.rejects(
+      setRole("admin", IDS.volunteer, role, expected),
+      (e) => e.code === "22023",
+    );
+  await assert.rejects(
+    setRole("admin", IDS.admin, "volunteer", "admin"),
+    /eigen rol/,
+  );
+  await assert.rejects(
+    setRole("admin", IDS.nonmember, "admin", "volunteer"),
+    /uitnodiging accepteren/,
+  );
+  await manage("admin", "block", IDS.volunteer);
+  await assert.rejects(
+    setRole("admin", IDS.volunteer, "admin", "volunteer"),
+    /Heractiveer/,
+  );
+  await manage("admin", "reactivate", IDS.volunteer);
+  await assert.rejects(
+    setRole("admin", IDS.volunteer, "admin", "admin"),
+    (e) => e.code === "40001",
+  );
+  const eventCount = async () =>
+    (
+      await pool.query(
+        "select count(*)::int n from material_private.user_events where action='role_changed'",
+      )
+    ).rows[0].n;
+  const n = await eventCount();
+  assert.equal(
+    (await setRole("admin", IDS.volunteer, "admin", "volunteer")).saved,
+    true,
+  );
+  assert.equal((await snapshot("volunteer")).role, "admin");
+  await manage("volunteer", "list");
+  await setRole("admin", IDS.volunteer, "admin", "volunteer");
+  assert.equal(await eventCount(), n + 1);
+  await setRole("admin", IDS.volunteer, "volunteer", "admin");
+  assert.equal((await snapshot("volunteer")).role, "volunteer");
+  await assert.rejects(manage("volunteer", "list"), (e) => e.code === "42501");
+  await assert.rejects(
+    command("volunteer", "catalog", {
+      entity: "category",
+      id: crypto.randomUUID(),
+      name: "Forbidden",
+    }),
+    (e) => e.code === "42501",
+  );
+  const history = (
+    await pool.query(
+      "select old_role,new_role from material_private.user_events where action='role_changed' order by id desc limit 2",
+    )
+  ).rows;
+  assert.deepEqual(history, [
+    { old_role: "admin", new_role: "volunteer" },
+    { old_role: "volunteer", new_role: "admin" },
+  ]);
+  assert.deepEqual(await snapshot(), before);
+  assert.deepEqual(
+    (await pool.query("select * from auth.users order by id")).rows,
+    auth,
+  );
+  assert.equal(
+    (
+      await asUser(
+        "anon",
+        "select has_function_privilege(current_user,'public.material_set_member_role(uuid,text,text)','EXECUTE') allowed",
+      )
+    )[0].allowed,
+    false,
+  );
+  const c = await pool.connect();
+  try {
+    await c.query("begin");
+    await c.query("set local role service_role");
+    await assert.rejects(
+      c.query(
+        "select public.material_set_member_role($1,'admin','volunteer')",
+        [IDS.volunteer],
+      ),
+      (e) => e.code === "42501",
+    );
+  } finally {
+    await c.query("rollback");
+    c.release();
+  }
+});
+
+test("demotion also rejects an admin command already waiting on the stock lock", async () => {
+  await setRole("admin", IDS.volunteer, "admin", "volunteer");
+  const before = await snapshot(),
+    c = await pool.connect();
+  let rejected;
+  try {
+    await c.query("begin");
+    await c.query("select pg_advisory_xact_lock(734621909)");
+    rejected = assert.rejects(
+      command("volunteer", "catalog", {
+        entity: "category",
+        id: crypto.randomUUID(),
+        name: "Waiting forbidden category",
+      }),
+      (e) => e.code === "42501",
+    );
+    let waiting = false;
+    for (let i = 0; i < 50; i++) {
+      waiting =
+        (
+          await pool.query(
+            "select count(*)::int n from pg_stat_activity where wait_event='advisory' and query like 'select public.material_command%' ",
+          )
+        ).rows[0].n > 0;
+      if (waiting) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.equal(waiting, true);
+    await c.query("set local role authenticated");
+    await c.query("select set_config('request.jwt.claims',$1,true)", [
+      JSON.stringify({ sub: IDS.admin, session_id: IDS.sessionAdmin }),
+    ]);
+    await c.query(
+      "select public.material_set_member_role($1,'volunteer','admin')",
+      [IDS.volunteer],
+    );
+    await c.query("commit");
+    await rejected;
+  } finally {
+    await c.query("rollback");
+    c.release();
+    await setRole("admin", IDS.volunteer, "volunteer", "admin");
+  }
+  assert.deepEqual(await snapshot(), before);
+});
+
+test("two admins cannot concurrently demote every administrator", async () => {
+  const other = crypto.randomUUID(),
+    session = crypto.randomUUID();
+  await pool.query(
+    "insert into auth.users(id,email) values($1,'role-admin@example.invalid')",
+    [other],
+  );
+  await pool.query("insert into auth.sessions(id,user_id) values($1,$2)", [
+    session,
+    other,
+  ]);
+  await pool.query(
+    "insert into material_private.members(user_id,role) values($1,'admin')",
+    [other],
+  );
+  const results = await Promise.allSettled([
+    setRole("admin", other, "volunteer", "admin"),
+    invitedUser(
+      other,
+      session,
+      "select public.material_set_member_role($1,'volunteer','admin')",
+      [IDS.admin],
+    ),
+  ]);
+  assert.equal(results.filter((x) => x.status === "fulfilled").length, 1);
+  assert.equal(
+    results.filter((x) => x.status === "rejected" && x.reason.code === "42501")
+      .length,
+    1,
+  );
+  assert.equal(
+    (
+      await pool.query(
+        "select count(*)::int n from material_private.members where role='admin' and status='active'",
+      )
+    ).rows[0].n,
+    1,
+  );
+  // Restore disposable fixture roles for the existing independent blocking test.
+  await pool.query(
+    "update material_private.members set role='admin' where user_id=$1",
+    [IDS.admin],
+  );
+  await pool.query(
+    "update material_private.members set role='volunteer' where user_id=$1",
+    [other],
+  );
+});
+
 test("two admins cannot concurrently disable all administrators", async () => {
   const other = crypto.randomUUID(),
     session = crypto.randomUUID();

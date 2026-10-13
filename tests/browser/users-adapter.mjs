@@ -68,6 +68,10 @@ export async function runUser(header, sql, args = []) {
   }
 }
 const definitions = {
+  material_set_member_role: [
+    "select public.material_set_member_role($1,$2,$3) as result",
+    ["target", "new_role", "expected_role"],
+  ],
   material_manage_users: [
     "select public.material_manage_users($1,$2) as result",
     ["action", "target"],

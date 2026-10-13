@@ -54,13 +54,29 @@ export function userManagementHandler({
       if (raw.length > 2048)
         return reply({ message: "Verzoek te groot." }, 413);
       const body = JSON.parse(raw);
-      if (!["list", "block", "reactivate", "invite"].includes(body.action))
+      if (
+        !["list", "block", "reactivate", "invite", "set_role"].includes(
+          body.action,
+        )
+      )
         return reply({ message: "Onbekende beheeractie." }, 400);
       if (body.action !== "invite") {
-        const result = await userClient.rpc("material_manage_users", {
-          action: body.action,
-          target: body.target || null,
-        });
+        if (body.action === "set_role" && body.confirmed !== true)
+          return reply(
+            { message: "Bevestig eerst de wijziging van de gebruikersrol." },
+            400,
+          );
+        const result =
+          body.action === "set_role"
+            ? await userClient.rpc("material_set_member_role", {
+                target: body.target || null,
+                new_role: body.role,
+                expected_role: body.expected_role,
+              })
+            : await userClient.rpc("material_manage_users", {
+                action: body.action,
+                target: body.target || null,
+              });
         if (result.error)
           return reply(
             {

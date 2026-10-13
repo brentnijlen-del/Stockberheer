@@ -180,3 +180,30 @@ test("delivery or completion failures are explicit and never leak service creden
     assert.ok(!JSON.stringify(b).includes("server-secret"));
   }
 });
+
+test("role changes require explicit confirmation, verified admin and personal SQL context, never server credentials", async () => {
+  const body = {
+    action: "set_role",
+    target: "user-id",
+    role: "admin",
+    expected_role: "volunteer",
+    confirmed: true,
+  };
+  const h = fixture();
+  assert.equal((await h.request({ ...body, confirmed: false })).status, 400);
+  assert.equal(h.calls.length, 0);
+  assert.equal((await h.request(body)).status, 200);
+  const call = h.calls.find((x) => x.name === "material_set_member_role");
+  assert.deepEqual(call.args, {
+    target: "user-id",
+    new_role: "admin",
+    expected_role: "volunteer",
+  });
+  assert.equal(call.server, false);
+  assert.ok(!h.calls.some((x) => x.server || x.type));
+  for (const opts of [{ role: "volunteer" }, { valid: false }]) {
+    const denied = fixture(opts);
+    assert.ok([401, 403].includes((await denied.request(body)).status));
+    assert.ok(!denied.calls.some((x) => x.server || x.type));
+  }
+});
