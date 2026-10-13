@@ -322,3 +322,97 @@ test("admin can create a category through the RPC with pg-safeupdate enabled", a
   await expect(page.locator("#content")).toContainText("Safeupdate categorie");
   await expect(page.locator("#message")).not.toBeVisible();
 });
+
+test("admin users screen invites a new volunteer, acceptance grants access and clears URL tokens", async ({
+  page,
+  browser,
+  request,
+}) => {
+  await login(page);
+  await nav(page, "Instellingen");
+  await page
+    .getByRole("button", { name: "Gebruikersbeheer", exact: true })
+    .click();
+  await expect(page.locator("#content h2")).toHaveText("Gebruikersbeheer");
+  await expect(page.locator("#content")).toContainText(
+    "volunteer@example.invalid",
+  );
+  await page
+    .locator('[data-command="inviteUser"] [name="email"]')
+    .fill("new@example.invalid");
+  await page.getByRole("button", { name: "Vrijwilliger uitnodigen" }).click();
+  await expect(page.locator("#userStatus")).toContainText(
+    "Uitnodiging verzonden",
+  );
+  await expect(
+    page.locator(".item").filter({ hasText: "new@example.invalid" }),
+  ).toContainText("Uitgenodigd");
+  const link = await (
+    await request.post("http://127.0.0.1:8040/_test/invitation", {
+      data: { email: "new@example.invalid" },
+    })
+  ).json();
+  const invited = await browser.newPage({ baseURL: "http://127.0.0.1:8000" });
+  await invited.goto(link.url);
+  await expect(
+    invited.locator("#invitation"),
+    await invited.locator("#loginError").textContent(),
+  ).toBeVisible();
+  expect(invited.url()).toBe("http://127.0.0.1:8000/");
+  await invited.locator("#invitePassword").fill("persoonlijk-test-wachtwoord");
+  await invited.locator("#inviteRepeat").fill("persoonlijk-test-wachtwoord");
+  await invited.getByRole("button", { name: "Uitnodiging accepteren" }).click();
+  await expect(
+    invited.locator("#app"),
+    await invited.locator("#inviteError").textContent(),
+  ).toBeVisible();
+  await expect(invited.locator("#mode")).toHaveText("Vrijwilligersmodus");
+  await expect(invited.locator("#nav")).not.toContainText("Instellingen");
+  await expect(invited.locator("#nav")).not.toContainText("Gebruikersbeheer");
+  await invited.close();
+  await page.getByRole("button", { name: "Overzicht verversen" }).click();
+  await expect(
+    page.locator(".item").filter({ hasText: "new@example.invalid" }),
+  ).toContainText("Actief");
+});
+test("admin blocks and reactivates a volunteer while self-block and volunteer user management stay unavailable", async ({
+  page,
+}) => {
+  await login(page);
+  await nav(page, "Instellingen");
+  await page
+    .getByRole("button", { name: "Gebruikersbeheer", exact: true })
+    .click();
+  page.on("dialog", (d) => d.accept());
+  const row = page
+    .locator(".item")
+    .filter({ hasText: "volunteer@example.invalid" });
+  await row.getByRole("button", { name: "Blokkeren", exact: true }).click();
+  await expect(row).toContainText("Geblokkeerd");
+  await row.getByRole("button", { name: "Heractiveren", exact: true }).click();
+  await expect(row).toContainText("Actief");
+  await expect(
+    page.locator(".item").filter({ hasText: "admin@example.invalid" }),
+  ).toContainText("Je eigen account");
+});
+
+test("users screen remains usable at mobile and desktop widths", async ({
+  page,
+}) => {
+  await login(page);
+  await nav(page, "Instellingen");
+  await page
+    .getByRole("button", { name: "Gebruikersbeheer", exact: true })
+    .click();
+  for (const width of [320, 390, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expect(
+      page.getByRole("button", { name: "Vrijwilliger uitnodigen" }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  }
+});

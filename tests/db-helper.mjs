@@ -37,6 +37,11 @@ export async function setup() {
   await pool.query(
     bootstrap
       .replace(
+        "create role service_role nologin;",
+        () =>
+          "do $$begin if not exists(select from pg_roles where rolname='service_role')then create role service_role nologin;end if;end$$;",
+      )
+      .replace(
         "create role anon nologin;",
         () =>
           "do $$begin if not exists(select from pg_roles where rolname='anon')then create role anon nologin;end if;end$$;",
@@ -62,6 +67,11 @@ export async function setup() {
     IDS.volunteer,
     IDS.nonmember,
   ]);
+  for (const role of ["admin", "volunteer", "nonmember"])
+    await pool.query(
+      "update auth.users set email=$1,email_confirmed_at=now() where id=$2",
+      [role + "@example.invalid", IDS[role]],
+    );
   await pool.query(
     "insert into auth.sessions(id,user_id) values($1,$2),($3,$4),($5,$6)",
     [

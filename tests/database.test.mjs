@@ -769,3 +769,420 @@ test("missing revision singleton fails closed instead of committing an untracked
     c.release();
   }
 });
+
+test("user management migration is additive/idempotent and keeps existing members and inventory", async () => {
+  const { readFile, readdir } = await import("node:fs/promises");
+  const dir = new URL("../supabase/migrations/", import.meta.url);
+  const migration = await readFile(
+    new URL(
+      (await readdir(dir)).find((x) => x.endsWith("user_management.sql")),
+      dir,
+    ),
+    "utf8",
+  );
+  const before = await snapshot();
+  const users = (await pool.query("select * from auth.users order by id")).rows;
+  const members = (
+    await pool.query("select * from material_private.members order by user_id")
+  ).rows;
+  await pool.query(migration);
+  await pool.query(migration);
+  assert.deepEqual(await snapshot(), before);
+  assert.deepEqual(
+    (await pool.query("select * from auth.users order by id")).rows,
+    users,
+  );
+  assert.deepEqual(
+    (
+      await pool.query(
+        "select * from material_private.members order by user_id",
+      )
+    ).rows,
+    members,
+  );
+});
+async function manage(role, action, target = null) {
+  return (
+    await asUser(
+      role,
+      "select public.material_manage_users($1,$2::uuid) as result",
+      [action, target],
+    )
+  )[0].result;
+}
+async function invite(email, request = crypto.randomUUID()) {
+  return (
+    await asUser(
+      "admin",
+      "select public.material_prepare_invite($1,$2::uuid) as result",
+      [email, request],
+    )
+  )[0].result;
+}
+async function finish(inv, request, user, delivered = true) {
+  const c = await pool.connect();
+  try {
+    await c.query("begin");
+    await c.query("set local role service_role");
+    const r = await c.query(
+      "select public.material_finish_invite($1,$2,$3,$4,$5,$6) as result",
+      [inv, request, IDS.admin, IDS.sessionAdmin, user, delivered],
+    );
+    await c.query("commit");
+    return r.rows[0].result;
+  } catch (e) {
+    await c.query("rollback");
+    throw e;
+  } finally {
+    c.release();
+  }
+}
+async function invitedUser(user, session, sql, args = []) {
+  const c = await pool.connect();
+  try {
+    await c.query("begin");
+    await c.query("set local role authenticated");
+    await c.query("select set_config('request.jwt.claims',$1,true)", [
+      JSON.stringify({ sub: user, session_id: session }),
+    ]);
+    const r = await c.query(sql, args);
+    await c.query("commit");
+    return r.rows;
+  } catch (e) {
+    await c.query("rollback");
+    throw e;
+  } finally {
+    c.release();
+  }
+}
+test("directory is admin-only, exposes no passwords/tokens and audit/helpers remain inaccessible", async () => {
+  const list = await manage("admin", "list");
+  assert.ok(list.some((x) => x.email === "volunteer@example.invalid"));
+  assert.ok(
+    list.every(
+      (x) => !Object.keys(x).some((k) => /token|password|secret/i.test(k)),
+    ),
+  );
+  for (const role of ["anon", "nonmember", "volunteer"])
+    await assert.rejects(manage(role, "list"));
+  await assert.rejects(
+    asUser(
+      "volunteer",
+      "select public.material_prepare_invite('bad@example.invalid',$1)",
+      [crypto.randomUUID()],
+    ),
+  );
+  await assert.rejects(
+    asUser(
+      "admin",
+      "select public.material_finish_invite(null,null,null,null,null,true)",
+    ),
+  );
+  await assert.rejects(
+    asUser("admin", "select * from material_private.user_events"),
+  );
+  await assert.rejects(
+    asUser("volunteer", "select * from material_private.invitations"),
+  );
+});
+test("block/reactivate preserves accounts and inventory; old volunteer JWTs cannot mutate", async () => {
+  const before = await snapshot(),
+    accounts = (await pool.query("select * from auth.users order by id")).rows;
+  await manage("admin", "block", IDS.volunteer);
+  await assert.rejects(snapshot("volunteer"));
+  const f = await fixture();
+  await assert.rejects(
+    command("volunteer", "consume", {
+      product_id: f.product,
+      location_id: f.location,
+      quantity: 1,
+    }),
+    (e) => e.code === "42501",
+  );
+  await assert.rejects(
+    command("volunteer", "inventory", { location_id: f.location, lots: [] }),
+    (e) => e.code === "42501",
+  );
+  await assert.rejects(
+    command("volunteer", "shortage", { location_id: f.location, items: [] }),
+    (e) => e.code === "42501",
+  );
+  await manage("admin", "reactivate", IDS.volunteer);
+  assert.equal((await snapshot("volunteer")).role, "volunteer");
+  assert.deepEqual(
+    (await pool.query("select * from auth.users order by id")).rows,
+    accounts,
+  );
+  assert.deepEqual((await snapshot()).lots, before.lots);
+  assert.ok(
+    (
+      await pool.query(
+        "select action from material_private.user_events where target_id=$1",
+        [IDS.volunteer],
+      )
+    ).rows.some((x) => x.action === "block"),
+  );
+  await assert.rejects(manage("admin", "block", IDS.admin), /eigen toegang/);
+  assert.equal(
+    (
+      await pool.query(
+        "select count(*)::int as n from material_private.members where role='admin' and status='active'",
+      )
+    ).rows[0].n,
+    1,
+  );
+});
+test("blocking serializes with a waiting stock command and invalidates its pre-lock permissions", async () => {
+  const f = await fixture();
+  await command("admin", "receive", {
+    product_id: f.product,
+    location_id: f.location,
+    quantity: 3,
+  });
+  const c = await pool.connect();
+  try {
+    await c.query("begin");
+    await c.query("select pg_advisory_xact_lock(734621909)");
+    const pending = command("volunteer", "consume", {
+      product_id: f.product,
+      location_id: f.location,
+      quantity: 1,
+    });
+    const rejected = assert.rejects(pending, (e) => e.code === "42501");
+    for (let i = 0; i < 50; i++) {
+      const waiting = (
+        await pool.query(
+          "select count(*)::int as n from pg_stat_activity where wait_event='advisory' and query like 'select public.material_command%'",
+        )
+      ).rows[0].n;
+      if (waiting) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    await c.query("set local role authenticated");
+    await c.query("select set_config('request.jwt.claims',$1,true)", [
+      JSON.stringify({ sub: IDS.admin, session_id: IDS.sessionAdmin }),
+    ]);
+    await c.query("select public.material_manage_users('block',$1)", [
+      IDS.volunteer,
+    ]);
+    await c.query("commit");
+    await rejected;
+  } finally {
+    await c.query("rollback");
+    c.release();
+    await manage("admin", "reactivate", IDS.volunteer);
+  }
+  assert.equal(
+    (await snapshot()).lots.find((x) => x.product_id === f.product).quantity,
+    3,
+  );
+});
+test("new volunteer invitation, duplicate/expiry/resend and acceptance grant only volunteer permissions", async () => {
+  const request = crypto.randomUUID(),
+    email = "new-volunteer@example.invalid";
+  const inv = await invite(email, request);
+  const user = crypto.randomUUID(),
+    session = crypto.randomUUID();
+  await pool.query(
+    "insert into auth.users(id,email,invited_at,raw_user_meta_data)values($1,$2,now(),$3);",
+    [user, email, JSON.stringify({ material_invitation_id: inv.id })],
+  );
+  await pool.query("insert into auth.sessions(id,user_id)values($1,$2)", [
+    session,
+    user,
+  ]);
+  await finish(inv.id, request, user);
+  await pool.query("update auth.sessions set created_at=now() where id=$1", [
+    session,
+  ]);
+  assert.equal((await invite(email, request)).already_sent, true);
+  await assert.rejects(invite(email), /één minuut/);
+  await assert.rejects(
+    invitedUser(user, session, "select public.material_snapshot()"),
+  );
+  await assert.rejects(
+    invitedUser(user, session, "select public.material_accept_invite($1)", [
+      inv.id,
+    ]),
+    /e-mailadres/,
+  );
+  await pool.query(
+    "update auth.users set email_confirmed_at=now() where id=$1",
+    [user],
+  );
+  await pool.query(
+    "update material_private.invitations set expires_at=now()-interval '1 second',last_attempt_at=now()-interval '2 minutes' where id=$1",
+    [inv.id],
+  );
+  await assert.rejects(
+    invitedUser(user, session, "select public.material_accept_invite($1)", [
+      inv.id,
+    ]),
+    /verlopen/,
+  );
+  const resendRequest = crypto.randomUUID(),
+    again = await invite(email, resendRequest);
+  assert.equal(again.id, inv.id);
+  assert.equal(again.user_id, user);
+  assert.equal(again.delivery, "recovery");
+  await finish(inv.id, resendRequest, user);
+  await assert.rejects(
+    invitedUser(user, session, "select public.material_accept_invite($1)", [
+      inv.id,
+    ]),
+    /meest recente/,
+  );
+  await pool.query("update auth.sessions set created_at=now() where id=$1", [
+    session,
+  ]);
+  await invitedUser(user, session, "select public.material_accept_invite($1)", [
+    inv.id,
+  ]);
+  assert.equal(
+    (
+      await invitedUser(
+        user,
+        session,
+        "select public.material_snapshot() as result",
+      )
+    )[0].result.role,
+    "volunteer",
+  );
+  await invitedUser(user, session, "select public.material_accept_invite($1)", [
+    inv.id,
+  ]);
+  const f = await fixture();
+  await command("admin", "receive", {
+    product_id: f.product,
+    location_id: f.location,
+    quantity: 3,
+  });
+  for (const [type, payload] of [
+    [
+      "consume",
+      { product_id: f.product, location_id: f.location, quantity: 1 },
+    ],
+    [
+      "inventory",
+      {
+        location_id: f.location,
+        reason: "test",
+        lots: (await snapshot()).lots
+          .filter((x) => x.product_id === f.product)
+          .map((x) => ({ id: x.id, version: x.version, quantity: x.quantity })),
+      },
+    ],
+    [
+      "shortage",
+      {
+        location_id: f.location,
+        items: [{ product_id: f.product, quantity: 1 }],
+      },
+    ],
+  ]) {
+    if (type === "inventory")
+      payload.lots = (await snapshot()).lots
+        .filter((x) => x.product_id === f.product)
+        .map((x) => ({ id: x.id, version: x.version, quantity: x.quantity }));
+    await invitedUser(
+      user,
+      session,
+      "select public.material_command($1::jsonb,$2)",
+      [JSON.stringify({ type, payload }), crypto.randomUUID()],
+    );
+  }
+  await assert.rejects(
+    invitedUser(user, session, "select public.material_command($1::jsonb,$2)", [
+      JSON.stringify({ type: "catalog", payload: {} }),
+      crypto.randomUUID(),
+    ]),
+    (e) => e.code === "42501",
+  );
+  await assert.rejects(
+    invitedUser(user, session, "select public.material_manage_users('list')"),
+    (e) => e.code === "42501",
+  );
+  assert.equal(
+    (
+      await pool.query(
+        "select count(*)::int as n from auth.users where email=$1",
+        [email],
+      )
+    ).rows[0].n,
+    1,
+  );
+  await manage("admin", "block", user);
+  await assert.rejects(
+    invitedUser(user, session, "select public.material_accept_invite($1)", [
+      inv.id,
+    ]),
+  );
+  await manage("admin", "reactivate", user);
+  await assert.rejects(invite("admin@example.invalid"), /bestaande account/);
+});
+
+test("an unrelated Auth invite created after reservation cannot be rebound or reset", async () => {
+  const email = "other-application@example.invalid",
+    request = crypto.randomUUID();
+  const inv = await invite(email, request),
+    user = crypto.randomUUID();
+  await pool.query(
+    "insert into auth.users(id,email,invited_at) values($1,$2,now())",
+    [user, email],
+  );
+  await assert.rejects(finish(inv.id, request, user), /Account hoort niet/);
+  await pool.query(
+    "update material_private.invitations set last_attempt_at=now()-interval '2 minutes' where id=$1",
+    [inv.id],
+  );
+  await assert.rejects(invite(email), /bestaande account/);
+  assert.equal(
+    (
+      await pool.query(
+        "select user_id from material_private.invitations where id=$1",
+        [inv.id],
+      )
+    ).rows[0].user_id,
+    null,
+  );
+});
+
+test("two admins cannot concurrently disable all administrators", async () => {
+  const other = crypto.randomUUID(),
+    session = crypto.randomUUID();
+  await pool.query(
+    "insert into auth.users(id,email) values($1,'other-admin@example.invalid')",
+    [other],
+  );
+  await pool.query("insert into auth.sessions(id,user_id) values($1,$2)", [
+    session,
+    other,
+  ]);
+  await pool.query(
+    "insert into material_private.members(user_id,role) values($1,'admin')",
+    [other],
+  );
+  const results = await Promise.allSettled([
+    manage("admin", "block", other),
+    invitedUser(
+      other,
+      session,
+      "select public.material_manage_users('block',$1)",
+      [IDS.admin],
+    ),
+  ]);
+  assert.equal(results.filter((x) => x.status === "fulfilled").length, 1);
+  assert.equal(
+    results.filter((x) => x.status === "rejected" && x.reason.code === "42501")
+      .length,
+    1,
+  );
+  assert.equal(
+    (
+      await pool.query(
+        "select count(*)::int n from material_private.members where role='admin' and status='active'",
+      )
+    ).rows[0].n,
+    1,
+  );
+});

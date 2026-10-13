@@ -1,0 +1,4 @@
+[functions.user-management]
+# The project uses ES256 signing keys. The legacy gateway verifier only supports
+# legacy JWTs; handler.mjs verifies every user token with Auth getUser instead.
+verify_jwt = false

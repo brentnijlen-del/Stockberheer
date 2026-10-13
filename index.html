@@ -38,6 +38,33 @@
           <p id="loginError" role="alert"></p>
         </form>
       </section>
+      <section id="invitation" class="card hidden">
+        <h2>Welkom bij Hulpdienst Materiaalbeheer Nijlen</h2>
+        <p>
+          Kies een persoonlijk wachtwoord om je vrijwilligerstoegang te
+          activeren.
+        </p>
+        <form id="invitationForm">
+          <label for="invitePassword">Nieuw wachtwoord</label
+          ><input
+            id="invitePassword"
+            type="password"
+            minlength="12"
+            required
+            autocomplete="new-password"
+          /><label for="inviteRepeat">Wachtwoord herhalen</label
+          ><input
+            id="inviteRepeat"
+            type="password"
+            minlength="12"
+            required
+            autocomplete="new-password"
+          /><button id="acceptInvitation" type="submit">
+            Uitnodiging accepteren
+          </button>
+          <p id="inviteError" role="alert"></p>
+        </form>
+      </section>
       <section id="app" class="hidden">
         <nav id="nav"></nav>
         <div>

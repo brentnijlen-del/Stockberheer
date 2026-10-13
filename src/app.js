@@ -35,7 +35,9 @@ let state = null,
   syncing = false,
   syncEpoch = 0,
   lastSync = 0,
-  backupPreview = null;
+  backupPreview = null,
+  users = [],
+  invitationId = null;
 const service = new MaterialService(client.auth, {
   onStatus: (kind, text) => {
     const n = $("saveStatus");
@@ -125,6 +127,9 @@ function showLogin(text = "") {
   dirty = false;
   selectedCase = "";
   backupPreview = null;
+  users = [];
+  invitationId = null;
+  $("invitation").classList.add("hidden");
   scanner.stop();
   $("app").classList.add("hidden");
   $("login").classList.remove("hidden");
@@ -305,6 +310,7 @@ function render() {
     loans: loanPage,
     moves: movePage,
     settings: settingsPage,
+    users: userPage,
     scan: scanPage,
     help: () =>
       "<h2>Hulp</h2>" +
@@ -726,7 +732,8 @@ function settingsPage() {
   return (
     "<h2>Instellingen & back-ups</h2>" +
     card(
-      "<p>Persoonlijke accounts en rollen worden door de beheerder in Supabase ingesteld.</p>" +
+      "<p>Beheer persoonlijke vrijwilligerstoegang via Gebruikersbeheer.</p>" +
+        button("Gebruikersbeheer", "openUsers") +
         button("Voorraadback-up exporteren", "backup") +
         button("Historiek en uitleningen exporteren", "archiveExport"),
     ) +
@@ -918,6 +925,28 @@ document.addEventListener("submit", async (e) => {
   try {
     const data = Object.fromEntries(new FormData(f)),
       type = f.dataset.command;
+    if (type === "inviteUser") {
+      const epoch = service.epoch;
+      $("userStatus").textContent = "Uitnodiging wordt verstuurd…";
+      try {
+        const result = await service.edge({
+          action: "invite",
+          email: data.email,
+          role: "volunteer",
+          request_id: crypto.randomUUID(),
+        });
+        if (epoch !== service.epoch) return;
+        dirty = false;
+        await loadUsers();
+        $("userStatus").textContent = result.message;
+      } catch (e) {
+        if (epoch === service.epoch) {
+          $("userStatus").textContent = e.message;
+          error(e);
+        }
+      }
+      return;
+    }
     if (["selectCase", "scanCode"].includes(type)) {
       const code = data.case_code || data.scan_code,
         k = findCode(cases(), code);
@@ -1100,6 +1129,48 @@ document.addEventListener("click", async (e) => {
   try {
     const d = n.dataset;
     switch (d.action) {
+      case "openUsers":
+        await navigate("users");
+        await loadUsers();
+        break;
+      case "reloadUsers":
+        await loadUsers();
+        break;
+      case "resendInvite": {
+        if (!confirm("Opnieuw een uitnodiging versturen naar " + d.email + "?"))
+          return;
+        const epoch = service.epoch;
+        const result = await service.edge({
+          action: "invite",
+          email: d.email,
+          role: "volunteer",
+          request_id: crypto.randomUUID(),
+        });
+        if (epoch !== service.epoch) return;
+        await loadUsers();
+        $("userStatus").textContent = result.message;
+        break;
+      }
+      case "blockUser":
+      case "reactivateUser": {
+        if (
+          !confirm(
+            d.action === "blockUser"
+              ? "Toegang blokkeren? Voorraad en historiek blijven behouden."
+              : "Toegang heractiveren?",
+          )
+        )
+          return;
+        const epoch = service.epoch;
+        await service.edge({
+          action: d.action === "blockUser" ? "block" : "reactivate",
+          target: d.id,
+        });
+        if (epoch !== service.epoch) return;
+        await loadUsers();
+        $("userStatus").textContent = "Toegang bijgewerkt.";
+        break;
+      }
       case "navigate":
         await navigate(d.page);
         break;
@@ -1286,3 +1357,138 @@ setInterval(() => {
 try {
   localStorage.removeItem("rk_material_v3");
 } catch {} // Remove legacy private inventory; it never authorizes access.
+
+function userPage() {
+  if (state.role !== "admin") return "";
+  return (
+    "<h2>Gebruikersbeheer</h2>" +
+    card(
+      "<p>Alleen beheerders kunnen vrijwilligers uitnodigen en toegang blokkeren. Accounts, voorraad en historiek worden niet verwijderd.</p>" +
+        form(
+          "inviteUser",
+          label(
+            "E-mailadres vrijwilliger",
+            input("email", "", "email", 'required maxlength="254"'),
+          ),
+          "Vrijwilliger uitnodigen",
+        ) +
+        '<p id="userStatus" role="status" aria-live="polite"></p>' +
+        button("Overzicht verversen", "reloadUsers"),
+    ) +
+    card(
+      users
+        .map((u) => {
+          const expired =
+            u.status === "invited" &&
+            (!u.expires_at || new Date(u.expires_at) <= new Date());
+          const status =
+            u.status === "active"
+              ? "Actief"
+              : u.status === "blocked"
+                ? "Geblokkeerd"
+                : expired
+                  ? "Uitnodiging verlopen / niet bevestigd"
+                  : "Uitgenodigd";
+          const actions =
+            u.status === "invited"
+              ? button(
+                  "Opnieuw verzenden",
+                  "resendInvite",
+                  `data-email="${esc(u.email)}"`,
+                )
+              : u.id === service.user
+                ? "<span>Je eigen account</span>"
+                : button(
+                    u.status === "blocked" ? "Heractiveren" : "Blokkeren",
+                    u.status === "blocked" ? "reactivateUser" : "blockUser",
+                    `data-id="${esc(u.id)}"`,
+                    "secondary",
+                  );
+          return `<div class="item"><b>${esc(u.email || "E-mailadres niet beschikbaar")}</b><p>${esc(u.role)} · ${status} · ${u.date ? esc(new Date(u.date).toLocaleString("nl-BE")) : "Datum niet geregistreerd"}</p>${actions}</div>`;
+        })
+        .join("") || "<p>Overzicht wordt geladen.</p>",
+    )
+  );
+}
+async function loadUsers() {
+  if (state?.role !== "admin") return;
+  const epoch = service.epoch;
+  try {
+    const list = await service.edge({ action: "list" });
+    if (epoch !== service.epoch) return;
+    if (!Array.isArray(list)) throw new Error("Ongeldig gebruikersoverzicht.");
+    users = list;
+    if (page === "users") render();
+  } catch (e) {
+    if (epoch === service.epoch)
+      error(new Error("Gebruikersbeheer niet beschikbaar: " + e.message));
+  }
+}
+$("invitationForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!invitationId) return;
+  const password = $("invitePassword").value;
+  if (password.length < 12 || password !== $("inviteRepeat").value) {
+    $("inviteError").textContent =
+      "Gebruik minstens 12 tekens en vul tweemaal hetzelfde wachtwoord in.";
+    return;
+  }
+  const epoch = service.epoch;
+  $("acceptInvitation").disabled = true;
+  try {
+    const { error: e } = await client.auth.updateUser({ password });
+    if (e) throw e;
+    await service.call("material_accept_invite", { invitation: invitationId });
+    if (epoch !== service.epoch) return;
+    invitationId = null;
+    $("invitation").classList.add("hidden");
+    await sync(true);
+    $("login").classList.add("hidden");
+    $("app").classList.remove("hidden");
+    page = "volunteerHome";
+    renderNav();
+    render();
+    $("mode").textContent = "Vrijwilligersmodus";
+  } catch (e) {
+    if (epoch === service.epoch) $("inviteError").textContent = e.message;
+  } finally {
+    $("invitePassword").value = "";
+    $("inviteRepeat").value = "";
+    $("acceptInvitation").disabled = false;
+  }
+});
+async function incomingInvitation() {
+  const query = new URLSearchParams(location.search),
+    hash = new URLSearchParams(location.hash.slice(1)),
+    id = query.get("invitation");
+  if (!id) return;
+  history.replaceState(null, "", location.pathname);
+  if (
+    !hash.get("access_token") ||
+    !hash.get("refresh_token") ||
+    !["invite", "recovery"].includes(hash.get("type"))
+  ) {
+    $("loginError").textContent =
+      "Uitnodigingslink ongeldig of verlopen. Vraag de beheerder om opnieuw te verzenden.";
+    return;
+  }
+  try {
+    const { data, error: e } = await client.auth.setSession({
+      access_token: hash.get("access_token"),
+      refresh_token: hash.get("refresh_token"),
+    });
+    if (e) throw e;
+    const verified = await client.auth.getUser();
+    if (verified.error || verified.data.user?.id !== data.session.user.id)
+      throw new Error("Uitnodigingssessie ongeldig.");
+    service.activate(data.session.user.id);
+    await service.call("material_invite_status", { invitation: id });
+    invitationId = id;
+    $("login").classList.add("hidden");
+    $("invitation").classList.remove("hidden");
+    $("mode").textContent = "Uitnodiging accepteren";
+  } catch (e) {
+    showLogin("Uitnodiging niet geaccepteerd: " + e.message);
+  }
+}
+incomingInvitation();
