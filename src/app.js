@@ -925,6 +925,51 @@ document.addEventListener("submit", async (e) => {
   try {
     const data = Object.fromEntries(new FormData(f)),
       type = f.dataset.command;
+    if (type === "setUserRole") {
+      if (data.role === data.expected_role) return;
+      const roleName = data.role === "admin" ? "beheerder" : "vrijwilliger";
+      if (
+        !confirm(
+          `Rol van ${data.email} wijzigen naar ${roleName}?` +
+            (data.role === "admin"
+              ? " Deze persoon krijgt toegang tot alle beheerfuncties."
+              : " De beheerrechten worden ingetrokken."),
+        )
+      )
+        return;
+      const epoch = service.epoch;
+      const submit = f.querySelector('[type="submit"]');
+      submit.disabled = true;
+      $("userStatus").textContent = "Gebruikersrol wordt opgeslagen…";
+      try {
+        const result = await service.edge({
+          action: "set_role",
+          target: data.user_id,
+          role: data.role,
+          expected_role: data.expected_role,
+          confirmed: true,
+        });
+        if (epoch !== service.epoch) return;
+        if (result?.saved !== true)
+          throw new Error("Rolwijziging is niet bevestigd.");
+        dirty = false;
+        await loadUsers();
+        if (page === "users" && $("userStatus"))
+          $("userStatus").textContent = "Gebruikersrol opgeslagen.";
+      } catch (e) {
+        if (epoch === service.epoch) {
+          const message =
+            e.status && e.status < 500
+              ? e.message
+              : "Rolwijziging niet bevestigd. Ververs het overzicht voordat je opnieuw probeert.";
+          if ($("userStatus")) $("userStatus").textContent = message;
+          error(new Error(message));
+        }
+      } finally {
+        if (epoch === service.epoch) submit.disabled = false;
+      }
+      return;
+    }
     if (type === "inviteUser") {
       const epoch = service.epoch;
       $("userStatus").textContent = "Uitnodiging wordt verstuurd…";
@@ -1363,7 +1408,7 @@ function userPage() {
   return (
     "<h2>Gebruikersbeheer</h2>" +
     card(
-      "<p>Alleen beheerders kunnen vrijwilligers uitnodigen en toegang blokkeren. Accounts, voorraad en historiek worden niet verwijderd.</p>" +
+      "<p>Alleen beheerders kunnen vrijwilligers uitnodigen, rollen wijzigen en toegang blokkeren. Een nieuwe gebruiker accepteert eerst de uitnodiging; daarna kun je de rol wijzigen. Accounts, voorraad en historiek worden niet verwijderd.</p>" +
         form(
           "inviteUser",
           label(
@@ -1404,7 +1449,29 @@ function userPage() {
                     `data-id="${esc(u.id)}"`,
                     "secondary",
                   );
-          return `<div class="item"><b>${esc(u.email || "E-mailadres niet beschikbaar")}</b><p>${esc(u.role)} · ${status} · ${u.date ? esc(new Date(u.date).toLocaleString("nl-BE")) : "Datum niet geregistreerd"}</p>${actions}</div>`;
+          const roles =
+            u.status === "active" && u.id !== service.user
+              ? form(
+                  "setUserRole",
+                  input("user_id", u.id, "hidden") +
+                    input("email", u.email, "hidden") +
+                    input("expected_role", u.role, "hidden") +
+                    label(
+                      "Gebruikersrol",
+                      selector(
+                        "role",
+                        [
+                          { id: "volunteer", name: "Vrijwilliger" },
+                          { id: "admin", name: "Beheerder" },
+                        ],
+                        u.role,
+                      ),
+                    ),
+                  "Rol opslaan",
+                )
+              : "";
+          const roleName = u.role === "admin" ? "Beheerder" : "Vrijwilliger";
+          return `<div class="item"><b>${esc(u.email || "E-mailadres niet beschikbaar")}</b><p>${roleName} · ${status} · ${u.date ? esc(new Date(u.date).toLocaleString("nl-BE")) : "Datum niet geregistreerd"}</p>${roles}${actions}</div>`;
         })
         .join("") || "<p>Overzicht wordt geladen.</p>",
     )
@@ -1461,6 +1528,22 @@ async function incomingInvitation() {
   const query = new URLSearchParams(location.search),
     hash = new URLSearchParams(location.hash.slice(1)),
     id = query.get("invitation");
+  if (hash.has("error_code") || hash.has("error")) {
+    history.replaceState(null, "", location.pathname);
+    $("loginError").textContent =
+      "Uitnodigingslink ongeldig, verlopen of al gebruikt. Vraag de beheerder om opnieuw te verzenden en open alleen de nieuwste mail.";
+    return;
+  }
+  if (
+    !id &&
+    (hash.has("access_token") ||
+      ["invite", "recovery"].includes(hash.get("type")))
+  ) {
+    history.replaceState(null, "", location.pathname);
+    $("loginError").textContent =
+      "Uitnodigingslink onvolledig. Laat de beheerder de Supabase-URL-instellingen controleren en opnieuw verzenden.";
+    return;
+  }
   if (!id) return;
   history.replaceState(null, "", location.pathname);
   if (

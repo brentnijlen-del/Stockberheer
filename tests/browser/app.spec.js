@@ -416,3 +416,105 @@ test("users screen remains usable at mobile and desktop widths", async ({
     ).toBe(true);
   }
 });
+
+test("admin chooses volunteer or admin with explicit confirmation; a demoted account loses management access", async ({
+  page,
+  browser,
+}) => {
+  await login(page);
+  await nav(page, "Instellingen");
+  await page
+    .getByRole("button", { name: "Gebruikersbeheer", exact: true })
+    .click();
+  const row = page
+    .locator(".item")
+    .filter({ hasText: "volunteer@example.invalid" });
+  await expect(
+    page
+      .locator(".item")
+      .filter({ hasText: "admin@example.invalid" })
+      .getByRole("combobox"),
+  ).toHaveCount(0);
+  let confirmations = 0;
+  page.on("dialog", async (d) => {
+    confirmations++;
+    expect(d.message()).toContain("Rol van volunteer@example.invalid");
+    await d.accept();
+  });
+  await row
+    .getByRole("combobox", { name: "Gebruikersrol" })
+    .selectOption("admin");
+  await row.getByRole("button", { name: "Rol opslaan" }).click();
+  await expect(page.locator("#userStatus")).toContainText(
+    "Gebruikersrol opgeslagen",
+  );
+  await expect(row).toContainText("Beheerder");
+  const promoted = await browser.newPage();
+  await login(promoted, "volunteer");
+  await expect(promoted.locator("#mode")).toHaveText("Beheerdersmodus");
+  await expect(promoted.locator("#nav")).toContainText("Instellingen");
+  await row
+    .getByRole("combobox", { name: "Gebruikersrol" })
+    .selectOption("volunteer");
+  await row.getByRole("button", { name: "Rol opslaan" }).click();
+  await expect(page.locator("#userStatus")).toContainText(
+    "Gebruikersrol opgeslagen",
+  );
+  await promoted
+    .getByRole("button", { name: "Verversen", exact: true })
+    .click();
+  await expect(promoted.locator("#login")).toBeVisible();
+  await expect(promoted.locator("#loginError")).toContainText(
+    "rechten zijn gewijzigd",
+  );
+  expect(confirmations).toBe(2);
+  await promoted.close();
+});
+
+test("a lost role-change response is reported as uncertain and refresh shows the server role", async ({
+  page,
+}) => {
+  await login(page);
+  await nav(page, "Instellingen");
+  await page
+    .getByRole("button", { name: "Gebruikersbeheer", exact: true })
+    .click();
+  page.on("dialog", (d) => d.accept());
+  let lost = false;
+  await page.route("**/functions/v1/user-management", async (route) => {
+    if (!lost && route.request().postDataJSON()?.action === "set_role") {
+      lost = true;
+      await route.fetch();
+      await route.abort();
+    } else await route.continue();
+  });
+  const row = page
+    .locator(".item")
+    .filter({ hasText: "volunteer@example.invalid" });
+  await row.getByRole("combobox").selectOption("admin");
+  await row.getByRole("button", { name: "Rol opslaan" }).click();
+  await expect(page.locator("#userStatus")).toContainText(
+    "Rolwijziging niet bevestigd",
+  );
+  await page.getByRole("button", { name: "Overzicht verversen" }).click();
+  await expect(row.getByRole("combobox")).toHaveValue("admin");
+});
+
+test("expired or stripped invitation redirects show an explanation and clear URL tokens without activating an account", async ({
+  page,
+}) => {
+  for (const [suffix, message] of [
+    ["#error=access_denied&error_code=otp_expired", "al gebruikt"],
+    [
+      "#access_token=fictitious&refresh_token=fictitious&type=invite",
+      "onvolledig",
+    ],
+  ]) {
+    await page.goto("about:blank");
+    await page.goto("/" + suffix);
+    await expect(page.locator("#loginError")).toContainText(message);
+    await expect(page.locator("#app")).toBeHidden();
+    await expect(page.locator("#invitation")).toBeHidden();
+    expect(new URL(page.url()).hash).toBe("");
+  }
+});
