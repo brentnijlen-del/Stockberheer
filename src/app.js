@@ -38,6 +38,7 @@ let state = null,
   lastSync = 0,
   backupPreview = null,
   users = [],
+  usersLoaded = false,
   invitationId = null,
   pinReset = false,
   pinEnrolled = false,
@@ -106,8 +107,8 @@ const locations = () => state.locations.filter((x) => x.active);
 const cases = () => locations().filter((x) => x.kind === "case");
 const name = (type, id) =>
   state[type].find((x) => x.id === id)?.name || "Onbekend";
-const form = (type, body, submit = "Opslaan") =>
-  `<form data-command="${type}">${body}<button type="submit">${esc(submit)}</button></form>`;
+const form = (type, body, submit = "Opslaan", submitAttrs = "") =>
+  `<form data-command="${type}">${body}<button type="submit" ${submitAttrs}>${esc(submit)}</button></form>`;
 const card = (body) => `<div class="card">${body}</div>`;
 const meta = () =>
   `<p class="muted">Bruikbare voorraad sluit vervallen loten uit. Vandaag: ${localDay()}.</p>`;
@@ -135,6 +136,7 @@ function showLogin(text = "") {
   selectedCase = "";
   backupPreview = null;
   users = [];
+  usersLoaded = false;
   invitationId = null;
   pinReset = false;
   pinEnrolled = false;
@@ -1319,6 +1321,7 @@ document.addEventListener("click", async (e) => {
     const d = n.dataset;
     switch (d.action) {
       case "openUsers":
+        usersLoaded = false;
         await navigate("users");
         await loadUsers();
         break;
@@ -1557,9 +1560,15 @@ function userPage() {
           "inviteUser",
           label(
             "E-mailadres vrijwilliger",
-            input("email", "", "email", 'required maxlength="254"'),
+            input(
+              "email",
+              "",
+              "email",
+              'required maxlength="254"' + (usersLoaded ? "" : " disabled"),
+            ),
           ),
           "Vrijwilliger uitnodigen",
+          usersLoaded ? "" : "disabled",
         ) +
         '<p id="userStatus" role="status" aria-live="polite"></p>' +
         button("Overzicht verversen", "reloadUsers"),
@@ -1629,6 +1638,7 @@ async function loadUsers() {
     if (epoch !== service.epoch) return;
     if (!Array.isArray(list)) throw new Error("Ongeldig gebruikersoverzicht.");
     users = list;
+    usersLoaded = true;
     if (page === "users") render();
   } catch (e) {
     if (epoch === service.epoch)

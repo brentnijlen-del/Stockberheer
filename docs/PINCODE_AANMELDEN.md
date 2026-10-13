@@ -51,7 +51,7 @@ Een mislukte SQL-installatie rolt de betreffende transactie terug. Na ingebruikn
 
 ## Testgrenzen
 
-Resultaat op 13 oktober 2026: **76/76 automatische tests** en **23/23 browsertests geslaagd**. De productiebuild en bundelcontrole van de nieuwe Edge Function slagen. Er zijn geen afhankelijkheden toegevoegd.
+Resultaat op 13 oktober 2026: **76/76 automatische tests** en **24/24 browsertests geslaagd**. De productiebuild en bundelcontrole van de nieuwe Edge Function slagen. Er zijn geen afhankelijkheden toegevoegd. Een vertraagde directoryrespons wordt ook getest: het uitnodigingsformulier wordt pas bewerkbaar wanneer het overzicht geladen is, zodat een eerste antwoord geen ingevuld e-mailadres wist.
 
 Tests gebruiken PostgreSQL 17 met echte pg-safeupdate en fictieve accounts. Crypto, service-only rechten, idempotente installatie, sessie-/uitnodigingsbinding, counters en concurrency lopen tegen echte code/SQL. Browsertests simuleren Auth HTTP en SMTP; bij PIN-instellen worden de oude fake sessies expliciet ingetrokken om het strengere sessiescenario te testen. De fake Auth gebruikt een SHA-256-testdigest, geen echte GoTrue-bcrypt. Geen e-mails verstuurd of live accounts veranderd tijdens deze tests.
 

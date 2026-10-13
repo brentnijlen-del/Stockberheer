@@ -678,3 +678,30 @@ test("offline PIN login shows uncertainty and clears the entered PIN without cre
   await expect(page.locator("#password")).toHaveValue("");
   await expect(page.locator("#app")).toBeHidden();
 });
+
+test("invitation fields wait for a delayed initial directory response rather than losing typed email", async ({
+  page,
+}) => {
+  let release;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  await page.route("**/functions/v1/user-management", async (route) => {
+    if (route.request().postDataJSON()?.action === "list") await gate;
+    await route.continue();
+  });
+  await login(page);
+  await nav(page, "Instellingen");
+  await page
+    .getByRole("button", { name: "Gebruikersbeheer", exact: true })
+    .click();
+  const input = page.locator('[data-command="inviteUser"] [name="email"]');
+  await expect(input).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Vrijwilliger uitnodigen" }),
+  ).toBeDisabled();
+  release();
+  await expect(input).toBeEnabled();
+  await input.fill("retained@example.invalid");
+  await expect(input).toHaveValue("retained@example.invalid");
+});
