@@ -33,6 +33,13 @@ jobs:
         run: bash scripts/install-test-safeupdate.sh '${{ job.services.postgres.id }}'
       - run: npm test
       - run: npm run build
+      - name: Save tested production website for manual Netlify upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: materiaalbeheer-nijlen-publicatie
+          path: dist/
+          include-hidden-files: true
+          if-no-files-found: error
       - name: Browser tests
         run: CHROMIUM_PATH="$(find "$HOME/.cache/ms-playwright" -path '*/chrome-linux*/chrome' -type f | head -1)" npm run test:browser
       - run: npm audit --omit=dev --audit-level=moderate
