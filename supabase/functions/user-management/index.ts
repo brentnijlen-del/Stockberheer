@@ -5,7 +5,12 @@ const required = (name: string) => {
   if (!value) throw new Error(`Missing server configuration: ${name}`);
   return value;
 };
-const origin = new URL(required("MATERIAL_APP_ORIGIN")).origin;
+// Public project configuration, never a credential. A server secret can override
+// the origin when this repository is installed for another department/site.
+const origin = new URL(
+  Deno.env.get("MATERIAL_APP_ORIGIN") ||
+    "https://polite-conkies-1226e4.netlify.app",
+).origin;
 Deno.serve(
   userManagementHandler({
     createClient,
