@@ -1,33 +1,52 @@
-Hulpdienst Materiaalbeheer – Afdeling Nijlen
+Hulpdienst Materiaalbeheer — Rode Kruis-Vlaanderen, Afdeling Nijlen
 
-Deze versie gebruikt persoonlijke Supabase-accounts. Gedeelde toegangscodes en
-beheerders-PINs zijn verwijderd. Publiceer pas na het instellen van Supabase.
+Versie 2 gebruikt persoonlijke Supabase-accounts, een aparte relationele database,
+servervalidatie, transacties en een onveranderbare mutatiehistoriek.
 
-1. Maak eerst een back-up van de bestaande app_state-tabel in Supabase.
-2. Controleer en voer supabase/security.sql uit in de SQL Editor.
-   Dit vervangt bestaande toegangsregels voor app_state en app_members.
-3. Zet publieke registratie uit: Authentication > instellingen > Allow new users
-   to sign up uitschakelen. Gebruik persoonlijke accounts via Add user.
-4. Voeg elk goedgekeurd account toe aan app_members: user_id is de UUID uit
-   Authentication > Users; role is admin of volunteer. Rollen worden uitsluitend
-   via Supabase beheerd. Deel nooit een service_role- of geheime sleutel.
-5. Meld eerst aan als beheerder. Bij een lege database: maak een product aan om
-   de inventaris te initialiseren. Bij bestaande data: sla als beheerder een
-   wijziging op; dit verwijdert de oude PIN en gebruikersmodus uit de clouddata.
-6. Test met beheerder, vrijwilliger en een account zonder lidmaatschap.
-   Anonieme aanvragen mogen geen voorraad kunnen lezen of schrijven.
-7. Upload index.html naar de bestaande HTTPS Netlify-site nadat deze checks slagen.
+Deze branch is een voorstel. Er wordt niet automatisch naar productie gepubliceerd.
+Lees docs/INGEBRUIKNAME.md voordat je SQL uitvoert of een site publiceert.
+De oude live database blijft onveilig zolang de goedgekeurde cutover niet is uitgevoerd.
 
-Vrijwilligers kunnen voorraadbewegingen, tekorten en uitleningen wijzigen.
-De database beschermt catalogus en configuratie tegen vrijwilligerswijzigingen.
-Vrijwilligers delen operationele gegevens; dit is geen bescherming van individuele
-records tegen andere vrijwilligers. De JSON-opslag is geen onveranderbaar auditlog.
-Gelijktijdige wijzigingen worden geweigerd in plaats van stil overschreven.
-Bij een opslagfout meldt de app af: de wijziging is NIET opgeslagen.
-Sessies blijven alleen in het geheugen; herladen vraagt opnieuw aanmelden.
+Ontwikkeling:
+  npm ci
+  npm run build
+  npm run serve
 
-Lokale controle: node --test tests/auth.test.cjs
-Voor lokaal openen: python3 -m http.server 8000 (in deze map).
-De browser heeft internet nodig voor Supabase en de QR-scannerbibliotheek.
-De publishable Supabase-sleutel is bedoeld voor de browser. Databasebeleid
-bepaalt de toegang; verberg deze sleutel niet als vervanging voor toegangsregels.
+index.html is het bronbestand. Publiceer later uitsluitend de gebouwde dist/-map;
+deze bevat lokaal gebundelde scanner-, QR- en barcodebibliotheken en veilige headers.
+SUPABASE_URL en SUPABASE_PUBLISHABLE_KEY kunnen bij de build worden ingesteld.
+Gebruik voor acceptatietests een afzonderlijk Supabase-testproject.
+Gebruik nooit een geheime of service_role-sleutel in de browser/build.
+
+Automatische tests (vereisen een uitsluitend hiervoor gemaakte lokale database):
+  docker run -d --name nijlen-test-db -e POSTGRES_PASSWORD=fictitious-local-only \
+    -e POSTGRES_DB=material_test -p 127.0.0.1:55432:5432 postgres:17
+  bash scripts/install-test-safeupdate.sh nijlen-test-db
+  npm test
+  npm run test:browser
+
+Tests weigeren een database buiten localhost of met een andere naam dan material_test.
+Ze bouwen fictieve Auth-tabellen en voorraad op in die lokale testdatabase.
+Ze mogen NOOIT worden uitgevoerd tegen een echte Supabase-database.
+Voor browsers is Chromium nodig; stel CHROMIUM_PATH in op het lokale uitvoerbare bestand.
+
+Voorraadback-ups bevatten catalogus, koffermateriaallijsten en loten.
+Historiek, uitleningen en tekortmeldingen kunnen afzonderlijk worden geëxporteerd.
+Herstel bewaart bestaande historiek en vereist dat openstaande uitleningen terug zijn.
+Een voorraadback-up vervangt geen volledige databaseback-up van Supabase.
+Oude JSON-back-up converteren zonder upload:
+  node scripts/convert-legacy-backup.mjs oude.json voorraad-v2.json
+Controleer oude open uitleningen handmatig: vrije omschrijvingen kunnen niet veilig
+naar specifieke producten en loten worden vertaald. Oude historiek blijft apart bewaard.
+
+Meer informatie:
+  docs/AUDIT-HERSTEL.md — alle auditpunten en concrete oplossingen
+  docs/TESTRESULTATEN.md — testresultaten en beperkingen
+  docs/INGEBRUIKNAME.md — veilige ingebruikname, goedkeuringen en gevolgen voor andere apps
+
+Gerichte reparatie voor UPDATE requires a WHERE clause:
+  docs/SAFEUPDATE-HERSTEL.md
+  supabase/migrations/20261013122409_safeupdate_where_fix.sql
+Alleen deze aanvullende migratie is bedoeld voor reeds geïnstalleerde v2-databases.
+Productie-uitvoering vereist afzonderlijke toestemming; geen frontend-deploy nodig.
+De safeupdate-testinstaller vereist Linux x86_64, gcc, curl, dpkg-deb, Docker en SHA256.

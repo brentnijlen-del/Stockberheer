@@ -1,0 +1,45 @@
+name: Tests (no deployment)
+on:
+  pull_request:
+  push:
+    branches: ["codex/**"]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: fictitious-local-only
+          POSTGRES_DB: material_test
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:fictitious-local-only@127.0.0.1:55432/material_test
+      CHROMIUM_PATH: /usr/bin/chromium
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Install real pg-safeupdate in disposable PostgreSQL service
+        run: bash scripts/install-test-safeupdate.sh '${{ job.services.postgres.id }}'
+      - run: npm test
+      - run: npm run build
+      - name: Save tested production website for manual Netlify upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: materiaalbeheer-nijlen-publicatie
+          path: dist/
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Browser tests
+        run: CHROMIUM_PATH="$(find "$HOME/.cache/ms-playwright" -path '*/chrome-linux*/chrome' -type f | head -1)" npm run test:browser
+      - run: npm audit --omit=dev --audit-level=moderate

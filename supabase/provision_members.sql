@@ -1,0 +1,6 @@
+-- Separate administrative step after review. Existing Auth accounts are never changed.
+-- Replace the UUID and role with an approved existing account. Never choose all Auth users automatically.
+-- insert into material_private.members(user_id,role)
+-- values ('EXISTING-APPROVED-AUTH-USER-UUID'::uuid,'admin')
+-- on conflict(user_id) do update set role=excluded.role;
+-- Repeat for approved volunteers with role='volunteer'.
