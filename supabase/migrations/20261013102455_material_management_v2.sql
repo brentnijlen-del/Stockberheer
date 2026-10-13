@@ -173,6 +173,7 @@ declare
  previous material_private.requests%rowtype; lot material_private.lots%rowtype; line material_private.loan_lines%rowtype;
  item jsonb; ident uuid; product uuid; location uuid; loan uuid; amount integer; remaining integer; take integer;
  result jsonb; exp date; current_revision bigint; entity text; nm text; code text; scan_key text; ver integer; existed boolean;
+ restore_category_ids uuid[]; restore_product_ids uuid[]; restore_location_ids uuid[]; restore_lot_ids uuid[];
 begin
  if request_id is null or jsonb_typeof(command)<>'object' or jsonb_typeof(p) is distinct from 'object' or octet_length(command::text)>5000000 then raise exception 'Ongeldig verzoek' using errcode='22023';end if;
  -- Small departmental inventory: serialize commands; clients submit operations, never stale state.
@@ -303,10 +304,16 @@ begin
   if current_revision is distinct from (p->>'revision')::bigint then raise exception 'Voorraad gewijzigd sinds importvoorbeeld; ververs' using errcode='40001';end if;
   if exists(select 1 from material_private.loan_lines where returned<quantity) then raise exception 'Breng openstaande uitleningen eerst terug';end if;
   perform material_private.validate_backup(p->'backup');
+  -- Capture the existing inventory identities under the command lock. Restore only these rows.
+  -- Explicit key predicates keep safeupdate active; no blanket WHERE true or security overrides.
+  select array_agg(id) into restore_category_ids from material_private.categories;
+  select array_agg(id) into restore_product_ids from material_private.products;
+  select array_agg(id) into restore_location_ids from material_private.locations;
+  select array_agg(id) into restore_lot_ids from material_private.lots;
   -- Archive, never delete, historical identities. Historic moves and requests remain immutable.
-  update material_private.categories set active=false,version=version+1;
-  update material_private.products set active=false,version=version+1;
-  update material_private.locations set active=false,version=version+1;
+  update material_private.categories set active=false,version=version+1 where id = any(restore_category_ids);
+  update material_private.products set active=false,version=version+1 where id = any(restore_product_ids);
+  update material_private.locations set active=false,version=version+1 where id = any(restore_location_ids);
   for item in select value from jsonb_array_elements(p->'backup'->'categories') loop
    insert into material_private.categories(id,name,active) values((item->>'id')::uuid,material_private.text_value(item->'name',120,true),(item->>'active')::boolean) on conflict(id) do update set name=excluded.name,active=excluded.active;
   end loop;
@@ -316,12 +323,12 @@ begin
   for item in select value from jsonb_array_elements(p->'backup'->'products') loop
    insert into material_private.products(id,name,code,category_id,minimum,active) values((item->>'id')::uuid,material_private.text_value(item->'name',120,true),material_private.text_value(item->'code',80,true),(item->>'category_id')::uuid,material_private.whole(item->'minimum'),(item->>'active')::boolean) on conflict(id) do update set name=excluded.name,code=excluded.code,category_id=excluded.category_id,minimum=excluded.minimum,active=excluded.active;
   end loop;
-  delete from material_private.targets;
+  delete from material_private.targets where location_id = any(restore_location_ids);
   insert into material_private.targets select (x->>'location_id')::uuid,(x->>'product_id')::uuid,material_private.whole(x->'quantity') from jsonb_array_elements(p->'backup'->'targets') x;
   for lot in select * from material_private.lots loop
    if lot.quantity<>0 then perform material_private.audit(request_id,'herstel',lot.id,-lot.quantity);end if;
   end loop;
-  update material_private.lots set quantity=0,version=version+1;
+  update material_private.lots set quantity=0,version=version+1 where id = any(restore_lot_ids);
   for item in select value from jsonb_array_elements(p->'backup'->'lots') loop
    ident:=(item->>'id')::uuid;amount:=material_private.whole(item->'quantity');
    if exists(select 1 from material_private.lots where id=ident and (product_id<>(item->>'product_id')::uuid or location_id<>(item->>'location_id')::uuid or batch is distinct from item->>'batch' or expiry is distinct from nullif(item->>'expiry','')::date)) then raise exception 'Historische lotidentiteit mag niet veranderen';end if;
@@ -330,7 +337,8 @@ begin
   end loop;
   perform material_private.audit(request_id,'back-upherstel',null,0,jsonb_build_object('format',2));
  else raise exception 'Onbekende handeling' using errcode='22023';end if;
- update material_private.revision set value=value+1 returning value into current_revision;
+ update material_private.revision set value=value+1 where singleton=true returning value into current_revision;
+ if not found then raise exception 'Revisierij ontbreekt; handeling teruggedraaid' using errcode='P0001';end if;
  result:=jsonb_build_object('revision',current_revision,'saved',true);
  insert into material_private.requests values(auth.uid(),request_id,command,result);
  return result;

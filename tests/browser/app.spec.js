@@ -303,3 +303,22 @@ test("expired access tokens refresh automatically while remaining in the same ac
   expect(refreshes).toBeGreaterThan(0);
   await expect(page.locator("#mode")).toHaveText("Vrijwilligersmodus");
 });
+
+test("admin can create a category through the RPC with pg-safeupdate enabled", async ({
+  page,
+}) => {
+  await login(page);
+  await nav(page, "Producten & categorieën");
+  await page
+    .getByRole("button", { name: "Nieuwe categorie", exact: true })
+    .click();
+  await page.locator('#editor [name="name"]').fill("Safeupdate categorie");
+  await page
+    .locator("#editor")
+    .getByRole("button", { name: "Opslaan", exact: true })
+    .click();
+  await expect(page.locator("#editor")).not.toBeVisible();
+  await expect(page.locator("#saveStatus")).toHaveText("Opgeslagen.");
+  await expect(page.locator("#content")).toContainText("Safeupdate categorie");
+  await expect(page.locator("#message")).not.toBeVisible();
+});

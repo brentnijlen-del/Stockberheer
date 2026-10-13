@@ -575,3 +575,197 @@ test("concurrent receipts accumulate without lost stock or duplicate lot identit
   assert.equal(lots.length, 1);
   assert.equal(lots[0].quantity, 20);
 });
+
+test("real safeupdate remains enabled and rejects bare UPDATE and DELETE", async () => {
+  const c = await pool.connect();
+  try {
+    const enabled = (
+      await c.query("select current_setting('safeupdate.enabled') as enabled")
+    ).rows[0].enabled;
+    assert.equal(enabled, "on");
+    await c.query(
+      "create temporary table safety_probe(id integer primary key, value integer);insert into safety_probe values(1,1)",
+    );
+    for (const sql of [
+      "update safety_probe set value=2",
+      "delete from safety_probe",
+    ])
+      await assert.rejects(
+        c.query(sql),
+        (e) => e.code === "21000" && /requires a WHERE clause/.test(e.message),
+      );
+    await c.query("update safety_probe set value=2 where id=1");
+    await c.query("delete from safety_probe where id=1");
+  } finally {
+    c.release();
+  }
+});
+
+test("installed-database upgrade fixes category creation without changing existing data or grants", async () => {
+  const { readFile, readdir } = await import("node:fs/promises");
+  const migrations = new URL("../supabase/migrations/", import.meta.url);
+  const file = (await readdir(migrations)).find((x) =>
+    x.endsWith("safeupdate_where_fix.sql"),
+  );
+  const patch = await readFile(new URL(file, migrations), "utf8");
+  const old = await readFile(
+    new URL("./fixtures/execute-before-safeupdate.sql", import.meta.url),
+    "utf8",
+  );
+  await pool.query(
+    "create table public.app_state(id text primary key,data jsonb not null);insert into public.app_state values('legacy','{}');alter table public.app_state enable row level security;grant select on public.app_state to anon;create policy legacy_probe on public.app_state for select to anon using(true)",
+  );
+  const unrelated = async () =>
+    (
+      await pool.query(`select jsonb_build_object(
+    'users',(select jsonb_agg(to_jsonb(x) order by id) from auth.users x),
+    'sessions',(select jsonb_agg(to_jsonb(x) order by id) from auth.sessions x),
+    'members',(select jsonb_agg(to_jsonb(x) order by user_id) from material_private.members x),
+    'legacy',(select jsonb_agg(to_jsonb(x)) from public.app_state x),
+    'legacy_read',has_table_privilege('anon','public.app_state','SELECT'),
+    'legacy_policies',(select jsonb_agg(to_jsonb(x)) from pg_policies x where schemaname='public' and tablename='app_state')
+  ) as state`)
+    ).rows[0].state;
+  const unrelatedBefore = await unrelated();
+  const before = await snapshot();
+  const metadata = async () =>
+    (
+      await pool.query(
+        "select proowner,proacl,proconfig,prosecdef from pg_proc where oid='material_private.execute(jsonb,uuid)'::regprocedure",
+      )
+    ).rows[0];
+  const acl = await metadata();
+  await pool.query(old);
+  const category = crypto.randomUUID(),
+    request = crypto.randomUUID(),
+    payload = {
+      entity: "category",
+      id: category,
+      name: "Safeupdate regression",
+    };
+  await assert.rejects(
+    command("admin", "catalog", payload, request),
+    (e) =>
+      e.code === "21000" &&
+      e.message === "UPDATE requires a WHERE clause" &&
+      e.where.includes("revision"),
+  );
+  assert.deepEqual(
+    await snapshot(),
+    before,
+    "failed category creation must roll back category, revision and audit",
+  );
+  await pool.query(patch);
+  assert.deepEqual(
+    await snapshot(),
+    before,
+    "installing the repair itself must leave all data unchanged",
+  );
+  assert.deepEqual(
+    await metadata(),
+    acl,
+    "ownership, grants, search_path and definer status must be preserved",
+  );
+  assert.deepEqual(
+    await unrelated(),
+    unrelatedBefore,
+    "Auth accounts, membership and old-table data/access must remain unchanged",
+  );
+  const saved = await command("admin", "catalog", payload, request);
+  assert.equal(saved.saved, true);
+  const after = await snapshot();
+  assert.equal(after.revision, before.revision + 1);
+  assert.equal(after.categories.filter((x) => x.id === category).length, 1);
+  assert.deepEqual(after.lots, before.lots);
+  assert.deepEqual(after.products, before.products);
+  assert.deepEqual(after.locations, before.locations);
+  assert.deepEqual(after.loans, before.loans);
+  assert.deepEqual(await command("admin", "catalog", payload, request), saved);
+  assert.equal((await snapshot()).revision, after.revision);
+  await pool.query(patch);
+  assert.deepEqual(await snapshot(), after, "repair can be safely reapplied");
+  assert.deepEqual(await unrelated(), unrelatedBefore);
+  await pool.query("drop table public.app_state");
+});
+
+test("each of the five restore statements is reproduced separately with the real guard", async () => {
+  const { readFile, readdir } = await import("node:fs/promises");
+  const directory = new URL("../supabase/migrations/", import.meta.url);
+  const file = (await readdir(directory)).find((x) =>
+    x.endsWith("safeupdate_where_fix.sql"),
+  );
+  const patch = await readFile(new URL(file, directory), "utf8");
+  const definition = patch.match(
+    /create or replace function material_private\.execute\([\s\S]*?end\s*\$\$;/i,
+  )[0];
+  const predicates = [
+    " where id = any(restore_category_ids)",
+    " where id = any(restore_product_ids)",
+    " where id = any(restore_location_ids)",
+    " where location_id = any(restore_location_ids)",
+    " where id = any(restore_lot_ids)",
+  ];
+  const before = await snapshot();
+  const backup = inventoryBackup(before);
+  try {
+    for (const predicate of predicates) {
+      assert.ok(definition.includes(predicate));
+      await pool.query(definition.replace(predicate, ""));
+      await assert.rejects(
+        command("admin", "restore", { revision: before.revision, backup }),
+        (e) =>
+          e.code === "21000" &&
+          e.message ===
+            (predicate.startsWith(" where location_id")
+              ? "DELETE requires a WHERE clause"
+              : "UPDATE requires a WHERE clause"),
+      );
+      assert.deepEqual(
+        await snapshot(),
+        before,
+        `must roll back every change before ${predicate}`,
+      );
+    }
+  } finally {
+    await pool.query(patch);
+  }
+  await command("admin", "restore", { revision: before.revision, backup });
+  const after = await snapshot();
+  assert.deepEqual(
+    after.lots.map(({ version, ...x }) => x),
+    before.lots.map(({ version, ...x }) => x),
+  );
+  assert.deepEqual(after.targets, before.targets);
+  assert.deepEqual(after.loans, before.loans);
+  assert.equal(after.revision, before.revision + 1);
+  assert.ok(after.moves.length > before.moves.length);
+});
+
+test("missing revision singleton fails closed instead of committing an untracked write", async () => {
+  const c = await pool.connect();
+  try {
+    await c.query("begin");
+    await c.query("delete from material_private.revision where singleton=true");
+    await c.query("set local role authenticated");
+    await c.query("select set_config('request.jwt.claims',$1,true)", [
+      JSON.stringify({ sub: IDS.admin, session_id: IDS.sessionAdmin }),
+    ]);
+    await assert.rejects(
+      c.query("select public.material_command($1::jsonb,$2::uuid)", [
+        JSON.stringify({
+          type: "catalog",
+          payload: {
+            entity: "category",
+            id: crypto.randomUUID(),
+            name: "Must roll back",
+          },
+        }),
+        crypto.randomUUID(),
+      ]),
+      /Revisierij ontbreekt/,
+    );
+  } finally {
+    await c.query("rollback");
+    c.release();
+  }
+});

@@ -21,6 +21,7 @@ Gebruik nooit een geheime of service_role-sleutel in de browser/build.
 Automatische tests (vereisen een uitsluitend hiervoor gemaakte lokale database):
   docker run -d --name nijlen-test-db -e POSTGRES_PASSWORD=fictitious-local-only \
     -e POSTGRES_DB=material_test -p 127.0.0.1:55432:5432 postgres:17
+  bash scripts/install-test-safeupdate.sh nijlen-test-db
   npm test
   npm run test:browser
 
@@ -42,3 +43,10 @@ Meer informatie:
   docs/AUDIT-HERSTEL.md — alle auditpunten en concrete oplossingen
   docs/TESTRESULTATEN.md — testresultaten en beperkingen
   docs/INGEBRUIKNAME.md — veilige ingebruikname, goedkeuringen en gevolgen voor andere apps
+
+Gerichte reparatie voor UPDATE requires a WHERE clause:
+  docs/SAFEUPDATE-HERSTEL.md
+  supabase/migrations/20261013122409_safeupdate_where_fix.sql
+Alleen deze aanvullende migratie is bedoeld voor reeds geïnstalleerde v2-databases.
+Productie-uitvoering vereist afzonderlijke toestemming; geen frontend-deploy nodig.
+De safeupdate-testinstaller vereist Linux x86_64, gcc, curl, dpkg-deb, Docker en SHA256.

@@ -29,6 +29,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
+      - name: Install real pg-safeupdate in disposable PostgreSQL service
+        run: bash scripts/install-test-safeupdate.sh '${{ job.services.postgres.id }}'
       - run: npm test
       - run: npm run build
       - name: Browser tests

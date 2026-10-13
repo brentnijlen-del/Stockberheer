@@ -1,5 +1,7 @@
 # Testresultaten — 13 oktober 2026
 
+**Aanvulling safeupdate:** 47 unit-/SQL-/databasetests en 12 browsertests slagen nu met de echte pg-safeupdate-module actief. Zie [de gerichte herstelbeschrijving](SAFEUPDATE-HERSTEL.md). De resultaten hieronder beschrijven de oorspronkelijke oplevering.
+
 ## Uitgevoerd
 
 | Controle | Resultaat |

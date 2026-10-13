@@ -9,6 +9,8 @@ export const IDS = {
   sessionNonmember: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
 };
 export const pool = new pg.Pool({
+  // Every test connection exercises the same WHERE guard as the production RPC.
+  options: "-c session_preload_libraries=safeupdate",
   connectionString:
     process.env.TEST_DATABASE_URL ||
     "postgres://postgres:fictitious-local-only@127.0.0.1:55432/material_test",
