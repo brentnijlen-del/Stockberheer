@@ -31,6 +31,9 @@ export class MaterialService {
   edge(body) {
     return this.request("/functions/v1/user-management", body);
   }
+  pin(body) {
+    return this.request("/functions/v1/pin-auth", body);
+  }
   async request(path, body, epoch = this.epoch) {
     const user = this.user;
     if (!user) throw new Error("Meld eerst aan.");

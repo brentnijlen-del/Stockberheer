@@ -17,6 +17,7 @@ import {
   validateBackup,
 } from "./domain.js";
 import { MaterialService } from "./service.js";
+import { validPin, publicPinRequest } from "./pin-client.js";
 import { CameraScanner, hardwareListener } from "./scanner.js";
 const URL = __SUPABASE_URL__,
   KEY = __SUPABASE_KEY__;
@@ -37,7 +38,11 @@ let state = null,
   lastSync = 0,
   backupPreview = null,
   users = [],
-  invitationId = null;
+  invitationId = null,
+  pinReset = false,
+  pinEnrolled = false,
+  legacyLogin = false,
+  pinRequestId = null;
 const service = new MaterialService(client.auth, {
   onStatus: (kind, text) => {
     const n = $("saveStatus");
@@ -73,6 +78,7 @@ const volunteerPages = [
   "loans",
   "scan",
   "help",
+  "account",
 ];
 const label = (text, body) => `<label>${esc(text)}${body}</label>`;
 const input = (name, value = "", type = "text", attrs = "") =>
@@ -121,6 +127,7 @@ function clearError() {
   $("message").textContent = "";
 }
 function showLogin(text = "") {
+  if (legacyLogin) $("legacyLogin").click();
   service.invalidate();
   syncEpoch++;
   state = null;
@@ -129,6 +136,13 @@ function showLogin(text = "") {
   backupPreview = null;
   users = [];
   invitationId = null;
+  pinReset = false;
+  pinEnrolled = false;
+  for (const id of ["invitePassword", "inviteRepeat"]) {
+    $(id).disabled = false;
+    $(id).required = true;
+  }
+  pinRequestId = null;
   $("invitation").classList.add("hidden");
   scanner.stop();
   $("app").classList.add("hidden");
@@ -155,10 +169,24 @@ $("loginForm").addEventListener("submit", async (event) => {
   $("loginButton").disabled = true;
   $("loginError").textContent = "";
   try {
-    const { data, error: e } = await client.auth.signInWithPassword({
-      email: $("email").value.trim(),
-      password: $("password").value,
-    });
+    let data, e;
+    if (legacyLogin) {
+      ({ data, error: e } = await client.auth.signInWithPassword({
+        email: $("email").value.trim(),
+        password: $("password").value,
+      }));
+    } else {
+      const result = await publicPinRequest(URL, KEY, {
+        action: "login",
+        email: $("email").value.trim(),
+        pin: $("password").value,
+      });
+      if (!result.session?.access_token || !result.session?.refresh_token)
+        throw new Error("Aanmelding is niet bevestigd.");
+      const response = await client.auth.setSession(result.session);
+      data = response.data;
+      e = response.error;
+    }
     if (e) throw e;
     service.activate(data.user.id);
     await sync(true);
@@ -175,6 +203,42 @@ $("loginForm").addEventListener("submit", async (event) => {
   } finally {
     $("password").value = "";
     $("loginButton").disabled = false;
+  }
+});
+$("legacyLogin").addEventListener("click", () => {
+  legacyLogin = !legacyLogin;
+  const field = $("password");
+  field.value = "";
+  $("loginSecretLabel").textContent = legacyLogin
+    ? "Bestaand wachtwoord"
+    : "Pincode";
+  $("legacyLogin").textContent = legacyLogin
+    ? "Aanmelden met pincode"
+    : "Aanmelden met bestaand wachtwoord";
+  field.inputMode = legacyLogin ? "text" : "numeric";
+  if (legacyLogin) {
+    field.removeAttribute("pattern");
+    field.removeAttribute("minlength");
+    field.removeAttribute("maxlength");
+  } else {
+    field.pattern = "[0-9]{4,8}";
+    field.minLength = 4;
+    field.maxLength = 8;
+  }
+});
+$("forgotPin").addEventListener("click", async () => {
+  $("forgotPin").disabled = true;
+  try {
+    const result = await publicPinRequest(URL, KEY, {
+      action: "reset",
+      email: $("email").value.trim(),
+    });
+    $("loginError").textContent = result.message;
+  } catch (e) {
+    $("loginError").textContent = e.message;
+  } finally {
+    $("forgotPin").disabled = false;
+    $("password").value = "";
   }
 });
 async function sync(force = false) {
@@ -275,6 +339,7 @@ function renderNav() {
           ["moves", "Historiek"],
           ["scan", "Scanner"],
           ["settings", "Instellingen"],
+          ["account", "Mijn account"],
         ]
       : [
           ["volunteerHome", "🏠 Start"],
@@ -284,6 +349,7 @@ function renderNav() {
           ["loans", "↔️ Uitlenen"],
           ["scan", "📷 Scanner"],
           ["help", "❓ Hulp"],
+          ["account", "Mijn account"],
         ];
   $("nav").innerHTML =
     `<div class="nav-title">${state.role === "admin" ? "Beheer" : "Vrijwilliger"}</div>` +
@@ -311,6 +377,7 @@ function render() {
     moves: movePage,
     settings: settingsPage,
     users: userPage,
+    account: accountPage,
     scan: scanPage,
     help: () =>
       "<h2>Hulp</h2>" +
@@ -752,6 +819,38 @@ function settingsPage() {
     )
   );
 }
+function accountPage() {
+  return (
+    "<h2>Mijn account</h2>" +
+    card(
+      "<p>Kies een persoonlijke pincode van 4 tot en met 8 cijfers. Niemand kan je pincode in Gebruikersbeheer bekijken. Je oude wachtwoord wordt vervangen wanneer je dit bevestigt.</p>" +
+        "<p>Gebruik je dit account ook in andere toepassingen? Dan verandert ook het wachtwoord voor dat account. Vraag bij twijfel je beheerder. Meld opnieuw aan als je aanmelding ouder is dan 15 minuten.</p>" +
+        form(
+          "setPin",
+          label(
+            "Nieuwe pincode",
+            input(
+              "pin",
+              "",
+              "password",
+              'inputmode="numeric" pattern="[0-9]{4,8}" minlength="4" maxlength="8" autocomplete="new-password" required',
+            ),
+          ) +
+            label(
+              "Pincode herhalen",
+              input(
+                "repeat",
+                "",
+                "password",
+                'inputmode="numeric" pattern="[0-9]{4,8}" minlength="4" maxlength="8" autocomplete="new-password" required',
+              ),
+            ),
+          "Pincode opslaan",
+        ) +
+        '<p id="pinStatus" role="status" aria-live="polite"></p>',
+    )
+  );
+}
 function scanPage() {
   return (
     "<h2>Scanner</h2>" +
@@ -925,6 +1024,51 @@ document.addEventListener("submit", async (e) => {
   try {
     const data = Object.fromEntries(new FormData(f)),
       type = f.dataset.command;
+    if (type === "setPin") {
+      if (!validPin(data.pin) || data.pin !== data.repeat)
+        throw new Error(
+          "Vul tweemaal dezelfde pincode van 4 tot en met 8 cijfers in.",
+        );
+      if (
+        !confirm(
+          "Je persoonlijke pincode instellen en je oude wachtwoord vervangen?",
+        )
+      )
+        return;
+      const epoch = service.epoch;
+      const submit = f.querySelector('[type="submit"]');
+      submit.disabled = true;
+      $("pinStatus").textContent = "Pincode wordt opgeslagen…";
+      try {
+        pinRequestId ||= crypto.randomUUID();
+        const result = await service.pin({
+          action: "enrol",
+          pin: data.pin,
+          request_id: pinRequestId,
+        });
+        if (epoch !== service.epoch) return;
+        if (result.saved !== true)
+          throw new Error("Pincode-opslag niet bevestigd.");
+        const fresh = await client.auth.setSession(result.session);
+        if (fresh.error) throw fresh.error;
+        if (epoch !== service.epoch) return;
+        pinRequestId = null;
+        dirty = false;
+        if ($("pinStatus"))
+          $("pinStatus").textContent =
+            "Pincode opgeslagen. Gebruik voortaan je e-mailadres en pincode.";
+      } catch (e) {
+        if (epoch === service.epoch) {
+          if ($("pinStatus")) $("pinStatus").textContent = e.message;
+          error(e);
+        }
+      } finally {
+        for (const n of f.querySelectorAll('input[type="password"]'))
+          n.value = "";
+        if (epoch === service.epoch) submit.disabled = false;
+      }
+      return;
+    }
     if (type === "setUserRole") {
       if (data.role === data.expected_role) return;
       const roleName = data.role === "admin" ? "beheerder" : "vrijwilliger";
@@ -1493,31 +1637,63 @@ async function loadUsers() {
 }
 $("invitationForm").addEventListener("submit", async (e) => {
   e.preventDefault();
-  if (!invitationId) return;
+  if (!invitationId && !pinReset) return;
   const password = $("invitePassword").value;
-  if (password.length < 12 || password !== $("inviteRepeat").value) {
+  if (
+    !pinEnrolled &&
+    (!validPin(password) || password !== $("inviteRepeat").value)
+  ) {
     $("inviteError").textContent =
-      "Gebruik minstens 12 tekens en vul tweemaal hetzelfde wachtwoord in.";
+      "Vul tweemaal dezelfde pincode van 4 tot en met 8 cijfers in.";
     return;
   }
   const epoch = service.epoch;
   $("acceptInvitation").disabled = true;
   try {
-    const { error: e } = await client.auth.updateUser({ password });
-    if (e) throw e;
-    await service.call("material_accept_invite", { invitation: invitationId });
+    if (!pinEnrolled) {
+      pinRequestId ||= crypto.randomUUID();
+      const result = await service.pin({
+        action: "enrol",
+        pin: password,
+        invitation: invitationId,
+        request_id: pinRequestId,
+      });
+      if (epoch !== service.epoch) return;
+      if (result.saved !== true)
+        throw new Error("Pincode-opslag niet bevestigd.");
+      const fresh = await client.auth.setSession(result.session);
+      if (fresh.error) throw fresh.error;
+      if (epoch !== service.epoch) return;
+      pinEnrolled = true;
+      for (const id of ["invitePassword", "inviteRepeat"]) {
+        $(id).disabled = true;
+        $(id).required = false;
+      }
+    }
+    if (invitationId)
+      await service.call("material_accept_invite", {
+        invitation: invitationId,
+      });
     if (epoch !== service.epoch) return;
     invitationId = null;
+    pinReset = false;
+    pinEnrolled = false;
+    pinRequestId = null;
     $("invitation").classList.add("hidden");
     await sync(true);
     $("login").classList.add("hidden");
     $("app").classList.remove("hidden");
-    page = "volunteerHome";
+    page = state.role === "admin" ? "dashboard" : "volunteerHome";
     renderNav();
     render();
-    $("mode").textContent = "Vrijwilligersmodus";
+    $("mode").textContent =
+      state.role === "admin" ? "Beheerdersmodus" : "Vrijwilligersmodus";
   } catch (e) {
-    if (epoch === service.epoch) $("inviteError").textContent = e.message;
+    if (epoch === service.epoch)
+      $("inviteError").textContent = pinEnrolled
+        ? "Pincode opgeslagen. Toegang nog niet bevestigd; klik opnieuw om de activering te controleren. " +
+          e.message
+        : e.message;
   } finally {
     $("invitePassword").value = "";
     $("inviteRepeat").value = "";
@@ -1527,15 +1703,18 @@ $("invitationForm").addEventListener("submit", async (e) => {
 async function incomingInvitation() {
   const query = new URLSearchParams(location.search),
     hash = new URLSearchParams(location.hash.slice(1)),
-    id = query.get("invitation");
+    id = query.get("invitation"),
+    reset = query.get("pin_reset") === "1";
   if (hash.has("error_code") || hash.has("error")) {
     history.replaceState(null, "", location.pathname);
-    $("loginError").textContent =
-      "Uitnodigingslink ongeldig, verlopen of al gebruikt. Vraag de beheerder om opnieuw te verzenden en open alleen de nieuwste mail.";
+    $("loginError").textContent = reset
+      ? "Herstellink ongeldig, verlopen of al gebruikt. Kies Pincode vergeten en open alleen de nieuwste herstelmail."
+      : "Uitnodigingslink ongeldig, verlopen of al gebruikt. Vraag de beheerder om opnieuw te verzenden en open alleen de nieuwste mail.";
     return;
   }
   if (
     !id &&
+    !reset &&
     (hash.has("access_token") ||
       ["invite", "recovery"].includes(hash.get("type")))
   ) {
@@ -1544,7 +1723,7 @@ async function incomingInvitation() {
       "Uitnodigingslink onvolledig. Laat de beheerder de Supabase-URL-instellingen controleren en opnieuw verzenden.";
     return;
   }
-  if (!id) return;
+  if (!id && !reset) return;
   history.replaceState(null, "", location.pathname);
   if (
     !hash.get("access_token") ||
@@ -1565,8 +1744,16 @@ async function incomingInvitation() {
     if (verified.error || verified.data.user?.id !== data.session.user.id)
       throw new Error("Uitnodigingssessie ongeldig.");
     service.activate(data.session.user.id);
-    await service.call("material_invite_status", { invitation: id });
+    if (reset) await service.call("material_pin_status", {});
+    else await service.call("material_invite_status", { invitation: id });
     invitationId = id;
+    pinReset = reset;
+    $("invitation").querySelector("h2").textContent = reset
+      ? "Pincode herstellen"
+      : "Welkom bij Hulpdienst Materiaalbeheer Nijlen";
+    $("acceptInvitation").textContent = reset
+      ? "Pincode opslaan"
+      : "Uitnodiging accepteren";
     $("login").classList.add("hidden");
     $("invitation").classList.remove("hidden");
     $("mode").textContent = "Uitnodiging accepteren";

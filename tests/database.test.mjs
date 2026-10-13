@@ -1374,6 +1374,357 @@ test("two admins cannot concurrently demote every administrator", async () => {
   );
 });
 
+async function pinServer(name, args) {
+  const c = await pool.connect();
+  try {
+    await c.query("begin");
+    await c.query("set local role service_role");
+    const placeholders = args.map((_, i) => "$" + (i + 1)).join(",");
+    const r = await c.query(
+      `select public.${name}(${placeholders}) as result`,
+      args,
+    );
+    await c.query("commit");
+    return r.rows[0].result;
+  } catch (e) {
+    await c.query("rollback");
+    throw e;
+  } finally {
+    c.release();
+  }
+}
+test("PIN migration is additive/idempotent and credentials, budgets and broker RPCs are never accessible to browser roles", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const sql = await readFile(
+    new URL(
+      "../supabase/migrations/20261013184510_pin_authentication.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const before = await snapshot(),
+    auth = (await pool.query("select * from auth.users order by id")).rows,
+    members = (
+      await pool.query(
+        "select * from material_private.members order by user_id",
+      )
+    ).rows;
+  await pool.query(sql);
+  await pool.query(sql);
+  assert.deepEqual(await snapshot(), before);
+  assert.deepEqual(
+    (await pool.query("select * from auth.users order by id")).rows,
+    auth,
+  );
+  assert.deepEqual(
+    (
+      await pool.query(
+        "select * from material_private.members order by user_id",
+      )
+    ).rows,
+    members,
+  );
+  for (const role of ["anon", "volunteer", "admin", "nonmember"]) {
+    await assert.rejects(
+      asUser(role, "select * from material_private.pin_credentials"),
+    );
+    await assert.rejects(
+      asUser(role, "select * from material_private.pin_limits"),
+    );
+    await assert.rejects(
+      asUser(
+        role,
+        "select public.material_pin_prepare_login('volunteer@example.invalid')",
+      ),
+      (e) => e.code === "42501",
+    );
+    await assert.rejects(
+      asUser(role, "select public.material_pin_prepare_enrol($1,$2,null,$3)", [
+        IDS.volunteer,
+        IDS.sessionVolunteer,
+        crypto.randomUUID(),
+      ]),
+      (e) => e.code === "42501",
+    );
+  }
+  assert.equal(
+    (await asUser("volunteer", "select public.material_pin_status() result"))[0]
+      .result.enabled,
+    false,
+  );
+  await assert.rejects(
+    asUser("nonmember", "select public.material_pin_status()"),
+  );
+});
+test("PIN enrolment checks fresh session/active membership/invite binding, serializes requests and never writes Auth or inventory", async () => {
+  const before = await snapshot(),
+    auth = (await pool.query("select * from auth.users order by id")).rows;
+  const args = [IDS.volunteer, IDS.sessionVolunteer, null, crypto.randomUUID()];
+  await assert.rejects(
+    pinServer("material_pin_prepare_enrol", [
+      IDS.nonmember,
+      IDS.sessionNonmember,
+      null,
+      crypto.randomUUID(),
+    ]),
+    (e) => e.code === "42501",
+  );
+  await assert.rejects(
+    pinServer("material_pin_prepare_enrol", [
+      IDS.volunteer,
+      IDS.sessionAdmin,
+      null,
+      crypto.randomUUID(),
+    ]),
+    (e) => e.code === "42501",
+  );
+  await pool.query(
+    "update auth.sessions set created_at=now()-interval '16 minutes' where id=$1",
+    [IDS.sessionVolunteer],
+  );
+  await assert.rejects(
+    pinServer("material_pin_prepare_enrol", args),
+    /Meld opnieuw/,
+  );
+  await pool.query("update auth.sessions set created_at=now() where id=$1", [
+    IDS.sessionVolunteer,
+  ]);
+  await manage("admin", "block", IDS.volunteer);
+  await assert.rejects(
+    pinServer("material_pin_prepare_enrol", args),
+    (e) => e.code === "42501",
+  );
+  await manage("admin", "reactivate", IDS.volunteer);
+  const first = await pinServer("material_pin_prepare_enrol", args);
+  assert.match(first.pepper, /^[0-9a-f]{64}$/);
+  assert.equal(first.user_id, IDS.volunteer);
+  assert.deepEqual(await pinServer("material_pin_prepare_enrol", args), first);
+  await assert.rejects(
+    pinServer("material_pin_prepare_enrol", [
+      ...args.slice(0, 3),
+      crypto.randomUUID(),
+    ]),
+    /vijf minuten/,
+  );
+  await assert.rejects(
+    pinServer("material_pin_finish_enrol", [
+      ...args.slice(0, 3),
+      crypto.randomUUID(),
+      true,
+    ]),
+    /verzoek gewijzigd/,
+  );
+  await pinServer("material_pin_finish_enrol", [...args, false]);
+  assert.equal(
+    (await asUser("volunteer", "select public.material_pin_status() result"))[0]
+      .result.enabled,
+    false,
+  );
+  await pinServer("material_pin_prepare_enrol", args);
+  await pinServer("material_pin_finish_enrol", [...args, true]);
+  const eventsBefore = (
+    await pool.query(
+      "select count(*)::int n from material_private.user_events where action in ('pin_enabled','pin_changed')",
+    )
+  ).rows[0].n;
+  assert.equal(
+    (await pinServer("material_pin_prepare_enrol", args)).already_saved,
+    true,
+  );
+  await pinServer("material_pin_finish_enrol", [...args, true]);
+  assert.equal(
+    (
+      await pool.query(
+        "select count(*)::int n from material_private.user_events where action in ('pin_enabled','pin_changed')",
+      )
+    ).rows[0].n,
+    eventsBefore,
+  );
+  assert.equal(
+    (await asUser("volunteer", "select public.material_pin_status() result"))[0]
+      .result.enabled,
+    true,
+  );
+  assert.deepEqual(await snapshot(), before);
+  assert.deepEqual(
+    (await pool.query("select * from auth.users order by id")).rows,
+    auth,
+  );
+});
+test("PIN budgets persist for unknown emails, permit five attempts, expire and remain atomic across concurrent devices", async () => {
+  const email = "unknown-pin@example.invalid";
+  for (let i = 0; i < 5; i++)
+    assert.deepEqual(await pinServer("material_pin_prepare_login", [email]), {
+      allowed: true,
+    });
+  assert.deepEqual(await pinServer("material_pin_prepare_login", [email]), {
+    allowed: false,
+  });
+  await pool.query(
+    "update material_private.pin_limits set window_started=now()-interval '16 minutes' where key=$1",
+    ["login:" + email],
+  );
+  assert.deepEqual(await pinServer("material_pin_prepare_login", [email]), {
+    allowed: true,
+  });
+  const results = await Promise.all(
+    Array.from({ length: 10 }, () =>
+      pinServer("material_pin_prepare_login", [
+        "concurrent-pin@example.invalid",
+      ]),
+    ),
+  );
+  assert.equal(results.filter((r) => r.allowed).length, 5);
+  assert.equal(
+    (
+      await pool.query(
+        "select attempts from material_private.pin_limits where key='login:concurrent-pin@example.invalid'",
+      )
+    ).rows[0].attempts,
+    10,
+  );
+  await pool.query(
+    "update material_private.pin_limits set attempts=120 where key='login-global'",
+  );
+  assert.deepEqual(
+    await pinServer("material_pin_prepare_login", ["other@example.invalid"]),
+    { allowed: false },
+  );
+  await pool.query(
+    "update material_private.pin_limits set attempts=0 where key='login-global'",
+  );
+});
+test("PIN login completion rechecks blocked accounts and sessions; reset only permits active members and is throttled", async () => {
+  const prepared = await pinServer("material_pin_prepare_login", [
+    "volunteer@example.invalid",
+  ]);
+  assert.equal(prepared.user_id, IDS.volunteer);
+  await manage("admin", "block", IDS.volunteer);
+  assert.deepEqual(
+    await pinServer("material_pin_finish_login", [
+      IDS.volunteer,
+      IDS.sessionVolunteer,
+    ]),
+    { allowed: false },
+  );
+  assert.deepEqual(
+    await pinServer("material_pin_prepare_login", [
+      "volunteer@example.invalid",
+    ]),
+    { allowed: true },
+  );
+  assert.deepEqual(
+    await pinServer("material_pin_prepare_reset", [
+      "volunteer@example.invalid",
+    ]),
+    { allowed: false },
+  );
+  await manage("admin", "reactivate", IDS.volunteer);
+  assert.deepEqual(
+    await pinServer("material_pin_finish_login", [
+      IDS.volunteer,
+      IDS.sessionAdmin,
+    ]),
+    { allowed: false },
+  );
+  assert.deepEqual(
+    await pinServer("material_pin_finish_login", [
+      IDS.volunteer,
+      IDS.sessionVolunteer,
+    ]),
+    { allowed: true },
+  );
+  assert.equal(
+    (
+      await pool.query(
+        "select attempts from material_private.pin_limits where key='login:volunteer@example.invalid'",
+      )
+    ).rows[0].attempts,
+    0,
+  );
+  assert.deepEqual(
+    await pinServer("material_pin_prepare_reset", ["admin@example.invalid"]),
+    { allowed: true },
+  );
+  assert.deepEqual(
+    await pinServer("material_pin_prepare_reset", ["admin@example.invalid"]),
+    { allowed: false },
+  );
+  assert.deepEqual(
+    await pinServer("material_pin_prepare_reset", [
+      "nonmember@example.invalid",
+    ]),
+    { allowed: false },
+  );
+});
+test("pending invite PIN enrolment requires its confirmed owner and a fresh valid link; enrolment alone grants no membership", async () => {
+  const actor = crypto.randomUUID(),
+    session = crypto.randomUUID(),
+    id = crypto.randomUUID(),
+    request = crypto.randomUUID();
+  await pool.query(
+    "insert into auth.users(id,email,invited_at,email_confirmed_at) values($1,'pending-pin@example.invalid',now(),now())",
+    [actor],
+  );
+  await pool.query("insert into auth.sessions(id,user_id)values($1,$2)", [
+    session,
+    actor,
+  ]);
+  await pool.query(
+    "insert into material_private.invitations(id,email,user_id,requested_by,request_id,state,sent_at,expires_at)values($1,'pending-pin@example.invalid',$2,$3,$4,'sent',now(),now()+interval '1 hour')",
+    [id, actor, IDS.admin, request],
+  );
+  await pool.query("update auth.sessions set created_at=now() where id=$1", [
+    session,
+  ]);
+  await assert.rejects(
+    pinServer("material_pin_prepare_enrol", [
+      IDS.volunteer,
+      IDS.sessionVolunteer,
+      id,
+      request,
+    ]),
+    (e) => e.code === "42501",
+  );
+  const prepared = await pinServer("material_pin_prepare_enrol", [
+    actor,
+    session,
+    id,
+    request,
+  ]);
+  assert.equal(prepared.user_id, actor);
+  await pinServer("material_pin_finish_enrol", [
+    actor,
+    session,
+    id,
+    request,
+    true,
+  ]);
+  await assert.rejects(
+    invitedUser(actor, session, "select public.material_snapshot()"),
+    (e) => e.code === "42501",
+  );
+  assert.deepEqual(
+    await pinServer("material_pin_prepare_login", [
+      "pending-pin@example.invalid",
+    ]),
+    { allowed: true },
+  );
+  await pool.query(
+    "update material_private.invitations set expires_at=now()-interval '1 second' where id=$1",
+    [id],
+  );
+  await assert.rejects(
+    pinServer("material_pin_prepare_enrol", [
+      actor,
+      session,
+      id,
+      crypto.randomUUID(),
+    ]),
+    (e) => e.code === "42501",
+  );
+});
+
 test("two admins cannot concurrently disable all administrators", async () => {
   const other = crypto.randomUUID(),
     session = crypto.randomUUID();

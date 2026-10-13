@@ -12,6 +12,12 @@ import {
   handler as usersHandler,
   confirmation,
 } from "./users-adapter.mjs";
+import {
+  handler as pinHandler,
+  recovery,
+  passwordDigest,
+  pinSession,
+} from "./pin-adapter.mjs";
 let f;
 async function reset() {
   await setup();
@@ -92,6 +98,32 @@ const server = createServer(async (req, res) => {
       send(await confirmation(JSON.parse(body).email));
       return;
     }
+    if (req.url === "/functions/v1/pin-auth") {
+      const r = await pinHandler(
+        new Request("http://127.0.0.1:8040" + req.url, {
+          method: req.method,
+          headers: req.headers,
+          body,
+        }),
+      );
+      send(await r.json(), r.status);
+      return;
+    }
+    if (req.url === "/_test/pin-reset") {
+      send(await recovery(JSON.parse(body).email));
+      return;
+    }
+    if (req.url === "/rest/v1/rpc/material_pin_status") {
+      send(
+        (
+          await runUser(
+            req.headers.authorization,
+            "select public.material_pin_status() as result",
+          )
+        )[0].result,
+      );
+      return;
+    }
     if (req.url === "/auth/v1/user") {
       const u = await authUser(claims(req.headers.authorization).sub);
       if (!u) {
@@ -127,6 +159,10 @@ const server = createServer(async (req, res) => {
     }
     if (req.url.startsWith("/auth/v1/token")) {
       const b = JSON.parse(body);
+      if (b.refresh_token?.startsWith("refresh-pin:")) {
+        send(await pinSession(b.refresh_token.split(":")[1]));
+        return;
+      }
       const role = b.email?.split("@")[0] || b.refresh_token?.slice(8);
       if (!IDS[role] || b.password === "wrong") {
         send(
@@ -134,6 +170,21 @@ const server = createServer(async (req, res) => {
           400,
         );
         return;
+      }
+      if (b.email) {
+        const saved = (
+          await pool.query(
+            "select encrypted_password from auth.users where id=$1",
+            [IDS[role]],
+          )
+        ).rows[0]?.encrypted_password;
+        if (saved && saved !== passwordDigest(b.password)) {
+          send(
+            { error: "invalid_grant", error_description: "Ongeldig account" },
+            400,
+          );
+          return;
+        }
       }
       send(token(role));
       return;
