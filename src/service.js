@@ -25,7 +25,13 @@ export class MaterialService {
     for (const c of this.controllers) c.abort();
     this.controllers.clear();
   }
-  async call(path, body, epoch = this.epoch) {
+  call(path, body, epoch = this.epoch) {
+    return this.request("/rest/v1/rpc/" + path, body, epoch);
+  }
+  edge(body) {
+    return this.request("/functions/v1/user-management", body);
+  }
+  async request(path, body, epoch = this.epoch) {
     const user = this.user;
     if (!user) throw new Error("Meld eerst aan.");
     const { data, error } = await this.auth.getSession();
@@ -40,7 +46,7 @@ export class MaterialService {
     this.controllers.add(controller);
     const timer = setTimeout(() => controller.abort(), this.timeout);
     try {
-      const response = await this.fetch(`${this.url}/rest/v1/rpc/${path}`, {
+      const response = await this.fetch(`${this.url}${path}`, {
         method: "POST",
         headers: {
           apikey: this.key,

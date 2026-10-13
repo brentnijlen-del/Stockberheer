@@ -1,0 +1,2 @@
+[functions.user-management]
+verify_jwt = true

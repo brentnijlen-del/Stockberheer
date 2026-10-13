@@ -4,6 +4,14 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { setup, command, snapshot, fixture, pool, IDS } from "../db-helper.mjs";
+import {
+  accessToken,
+  claims,
+  authUser,
+  runUser,
+  handler as usersHandler,
+  confirmation,
+} from "./users-adapter.mjs";
 let f;
 async function reset() {
   await setup();
@@ -27,7 +35,10 @@ async function reset() {
 await reset();
 function token(role) {
   return {
-    access_token: "token-" + role,
+    access_token: accessToken(
+      IDS[role],
+      IDS["session" + role[0].toUpperCase() + role.slice(1)],
+    ),
     token_type: "bearer",
     expires_in: 3600,
     expires_at: Math.floor(Date.now() / 1000) + 3600,
@@ -49,7 +60,7 @@ const server = createServer(async (req, res) => {
     "Access-Control-Allow-Headers",
     "apikey,authorization,content-type,x-client-info,x-supabase-api-version",
   );
-  res.setHeader("Access-Control-Allow-Methods", "POST,GET,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "POST,GET,PUT,OPTIONS");
   if (req.method === "OPTIONS") {
     res.writeHead(204);
     res.end();
@@ -64,6 +75,54 @@ const server = createServer(async (req, res) => {
   try {
     if (req.url === "/_test/reset") {
       send(await reset());
+      return;
+    }
+    if (req.url === "/functions/v1/user-management") {
+      const r = await usersHandler(
+        new Request("http://127.0.0.1:8040" + req.url, {
+          method: req.method,
+          headers: req.headers,
+          body,
+        }),
+      );
+      send(await r.json(), r.status);
+      return;
+    }
+    if (req.url === "/_test/invitation") {
+      send(await confirmation(JSON.parse(body).email));
+      return;
+    }
+    if (req.url === "/auth/v1/user") {
+      const u = await authUser(claims(req.headers.authorization).sub);
+      if (!u) {
+        send({ message: "Invalid token" }, 401);
+        return;
+      }
+      send(req.method === "PUT" ? { user: u } : u);
+      return;
+    }
+    if (req.url === "/rest/v1/rpc/material_invite_status") {
+      send(
+        (
+          await runUser(
+            req.headers.authorization,
+            "select public.material_invite_status($1) as result",
+            [JSON.parse(body).invitation],
+          )
+        )[0].result,
+      );
+      return;
+    }
+    if (req.url === "/rest/v1/rpc/material_accept_invite") {
+      send(
+        (
+          await runUser(
+            req.headers.authorization,
+            "select public.material_accept_invite($1) as result",
+            [JSON.parse(body).invitation],
+          )
+        )[0].result,
+      );
       return;
     }
     if (req.url.startsWith("/auth/v1/token")) {
@@ -86,13 +145,26 @@ const server = createServer(async (req, res) => {
     const role =
       req.headers.authorization?.replace("Bearer token-", "") || "anon";
     if (req.url === "/rest/v1/rpc/material_snapshot") {
-      send(await snapshot(role));
+      send(
+        (
+          await runUser(
+            req.headers.authorization,
+            "select public.material_snapshot() as result",
+          )
+        )[0].result,
+      );
       return;
     }
     if (req.url === "/rest/v1/rpc/material_command") {
       const b = JSON.parse(body);
       send(
-        await command(role, b.command.type, b.command.payload, b.request_id),
+        (
+          await runUser(
+            req.headers.authorization,
+            "select public.material_command($1::jsonb,$2::uuid) as result",
+            [JSON.stringify(b.command), b.request_id],
+          )
+        )[0].result,
       );
       return;
     }
@@ -109,7 +181,9 @@ const staticServer = createServer(async (req, res) => {
   try {
     const file = resolve(
       "dist",
-      req.url === "/" ? "index.html" : req.url.slice(1),
+      new URL(req.url, "http://127.0.0.1").pathname === "/"
+        ? "index.html"
+        : new URL(req.url, "http://127.0.0.1").pathname.slice(1),
     );
     if (!file.startsWith(resolve("dist") + "/")) throw new Error();
     const data = await readFile(file);
