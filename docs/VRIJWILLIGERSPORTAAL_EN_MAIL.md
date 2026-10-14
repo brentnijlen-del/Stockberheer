@@ -1,4 +1,6 @@
-# Duidelijk portaal, hulpvragen en automatische meldingen
+# Duidelijk portaal en hulpvragen
+
+**Actuele keuze: geen automatische mailing.** De geplande mailworkflow is verwijderd. Voorraadwaarschuwingen blijven onder Meldingen en hulpvragen blijven op het dashboard. De onderstaande mailinstructies zijn uitsluitend historische documentatie voor een eventuele latere heroverweging; voer ze niet uit. De ongebruikte mailfunctie en private tabellen zijn niet verwijderd.
 
 Deze wijziging is voorbereid op `codex/duidelijk-portaal-meldingen`. Installatie op productie en publicatie vereisen afzonderlijke goedkeuring. Er worden geen accounts, rollen, pincodes of voorraadgegevens gewijzigd door de migratie.
 
