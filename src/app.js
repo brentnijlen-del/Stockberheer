@@ -481,8 +481,7 @@ function helpPage() {
   );
 }
 function supportSettings() {
-  const c = state.support || {},
-    m = state.mail_status || {};
+  const c = state.support || {};
   return (
     card(
       "<h3>Contactgegevens voor vrijwilligers</h3>" +
@@ -519,8 +518,7 @@ function supportSettings() {
         ),
     ) +
     card(
-      "<h3>Automatische e-mailmeldingen</h3><p>Vervallen materiaal en lege bruikbare voorraad worden aan alle actieve beheerders gemeld zodra de maildienst is geactiveerd. Een hulpvraag is ook zichtbaar in het beheerdersoverzicht.</p>" +
-        `<p>Verzonden: ${m.sent || 0} · In wachtrij: ${m.pending || 0} · Mislukt: ${m.failed || 0}</p><p>Geen verzendbevestiging zichtbaar? Controleer de maildienst en de geplande taak.</p>`,
+      "<h3>Waarschuwingen en hulpvragen</h3><p>Controleer Meldingen voor vervallen materiaal en voorraadtekorten. Hulpvragen verschijnen in het beheerdersoverzicht. Er worden geen automatische e-mails verstuurd.</p>",
     )
   );
 }
