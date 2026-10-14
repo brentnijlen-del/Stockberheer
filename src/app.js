@@ -71,16 +71,7 @@ const scanner = new CameraScanner({
     if ($("scanStatus")) $("scanStatus").textContent = text;
   },
 });
-const volunteerPages = [
-  "volunteerHome",
-  "use",
-  "inventory",
-  "shortage",
-  "loans",
-  "scan",
-  "help",
-  "account",
-];
+const volunteerPages = ["volunteerHome", "use", "shortage", "help", "account"];
 const label = (text, body) => `<label>${esc(text)}${body}</label>`;
 const input = (name, value = "", type = "text", attrs = "") =>
   `<input name="${name}" type="${type}" value="${esc(value)}" ${attrs}>`;
@@ -346,17 +337,24 @@ function renderNav() {
       : [
           ["volunteerHome", "🏠 Start"],
           ["use", "📦 Verbruik"],
-          ["inventory", "Koffer controleren"],
           ["shortage", "⚠️ Tekort melden"],
-          ["loans", "↔️ Uitlenen"],
-          ["scan", "📷 Scanner"],
           ["help", "❓ Hulp"],
           ["account", "Mijn account"],
         ];
   $("nav").innerHTML =
     `<div class="nav-title">${state.role === "admin" ? "Beheer" : "Vrijwilliger"}</div>` +
     links
-      .map(([id, title]) => button(title, "navigate", `data-page="${id}"`))
+      .map(
+        ([id, title]) =>
+          (state.role === "admin" &&
+          {
+            dashboard: "Dagelijks beheer",
+            products: "Catalogus en controle",
+            settings: "Toegang en instellingen",
+          }[id]
+            ? `<div class="nav-group">${{ dashboard: "Dagelijks beheer", products: "Catalogus en controle", settings: "Toegang en instellingen" }[id]}</div>`
+            : "") + button(title, "navigate", `data-page="${id}"`),
+      )
       .join("") +
     button("Afmelden", "logout", "", "secondary nav-logout");
 }
@@ -381,11 +379,7 @@ function render() {
     users: userPage,
     account: accountPage,
     scan: scanPage,
-    help: () =>
-      "<h2>Hulp</h2>" +
-      card(
-        "<p>Contacteer je afdelingsbeheerder via de interne contactlijst.</p><p>Scan een koffer, registreer verbruik of tel per lot. Een tekortmelding verandert de geregistreerde voorraad niet. De beheerder vergelijkt je melding met de voorraad en verwerkt de aanvulling.</p>",
-      ),
+    help: helpPage,
   };
   s.innerHTML = (views[page] || dashboard)();
   for (const n of $("nav").querySelectorAll("[data-page]"))
@@ -397,7 +391,20 @@ function dashboard() {
     expired = a.filter((x) => x.kind === "expired").length;
   return (
     "<h2>Beheerdersoverzicht</h2>" +
+    '<p class="page-intro">Voorraad, waarschuwingen en hulpvragen op één plek.</p>' +
     meta() +
+    ((state.help_requests || []).filter((h) => !h.resolved_at).length
+      ? card(
+          "<h3>Open hulpvragen</h3>" +
+            state.help_requests
+              .filter((h) => !h.resolved_at)
+              .map(
+                (h) =>
+                  `<div class="item"><p><strong>${esc(h.actor_email || "Vrijwilliger")}</strong></p><p>${esc(h.message)}</p>${button("Hulpvraag verwerkt", "resolveHelp", `data-id="${h.id}"`)}</div>`,
+              )
+              .join(""),
+        )
+      : "") +
     `<div class="admin-kpis">${[
       ["Koffers", cases().length],
       ["Producten", products().length],
@@ -421,20 +428,100 @@ function dashboard() {
 }
 function volunteerHome() {
   return (
-    '<div class="vol-home"><h2>Welkom 👋</h2><p>Wat wil je doen?</p><div class="vol-actions">' +
+    '<div class="vol-home"><h2>Wat wil je doen?</h2><p class="page-intro">Kies een actie. Je kunt materiaalcodes scannen of een koffer uit de lijst kiezen.</p><div class="vol-actions">' +
     [
-      ["inventory", "📦 Koffer controleren"],
-      ["use", "Verbruik registreren"],
-      ["shortage", "⚠️ Snel tekort melden"],
-      ["loans", "↔️ Materiaal uitlenen"],
-      ["scan", "📷 Scanner"],
-      ["help", "❓ Hulp"],
+      ["shortage", "⚠️", "Tekort doorgeven", "Meld welk materiaal ontbreekt."],
+      ["use", "📦", "Verbruik registreren", "Registreer wat je hebt gebruikt."],
+      ["account", "👤", "Mijn account", "Beheer je persoonlijke pincode."],
+      [
+        "help",
+        "❓",
+        "Hulp vragen",
+        "Stel een vraag of contacteer de verantwoordelijke.",
+      ],
     ]
-      .map(([id, t]) =>
-        button(t, "navigate", `data-page="${id}"`, "vol-action"),
+      .map(
+        ([id, icon, title, detail]) =>
+          `<button type="button" class="vol-action" data-action="navigate" data-page="${id}"><span class="action-icon" aria-hidden="true">${icon}</span><strong>${title}</strong><span>${detail}</span></button>`,
       )
       .join("") +
     "</div></div>"
+  );
+}
+function helpPage() {
+  const c = state.support || {};
+  return (
+    '<h2>Hulp vragen</h2><p class="page-intro">Stel je vraag aan de beheerders. Gebruik de contactgegevens voor dringende hulp; een bericht wordt niet onmiddellijk gelezen.</p>' +
+    card(
+      "<h3>Contactpersoon</h3>" +
+        (c.contact_name || c.contact_email || c.contact_phone
+          ? `<p>${esc(c.contact_name || "Verantwoordelijke")}</p><p>${esc(c.contact_email || "")}</p><p>${esc(c.contact_phone || "")}</p>`
+          : "<p>De beheerder heeft nog geen contactgegevens ingevuld. Gebruik voorlopig de interne contactlijst.</p>"),
+    ) +
+    card(
+      "<h3>Een vraag stellen</h3><p>Je vraag wordt opgeslagen voor de beheerders. Vermeld geen patiëntgegevens.</p>" +
+        form(
+          "help",
+          label(
+            "Je vraag",
+            '<textarea name="message" rows="4" required maxlength="2000"></textarea>',
+          ),
+          "Hulpvraag doorgeven",
+        ),
+    ) +
+    card(
+      "<h3>Mijn hulpvragen</h3>" +
+        (state.help_requests || [])
+          .map(
+            (h) =>
+              `<div class="item"><p>${esc(h.message)}</p><span class="status-pill">${h.resolved_at ? "Verwerkt" : "Wacht op beheerder"}</span></div>`,
+          )
+          .join(""),
+    )
+  );
+}
+function supportSettings() {
+  const c = state.support || {},
+    m = state.mail_status || {};
+  return (
+    card(
+      "<h3>Contactgegevens voor vrijwilligers</h3>" +
+        form(
+          "support_settings",
+          label(
+            "Naam verantwoordelijke",
+            input(
+              "contact_name",
+              c.contact_name || "",
+              "text",
+              'maxlength="120"',
+            ),
+          ) +
+            label(
+              "E-mailadres",
+              input(
+                "contact_email",
+                c.contact_email || "",
+                "email",
+                'maxlength="254"',
+              ),
+            ) +
+            label(
+              "Telefoonnummer",
+              input(
+                "contact_phone",
+                c.contact_phone || "",
+                "tel",
+                'maxlength="80"',
+              ),
+            ),
+          "Contactgegevens opslaan",
+        ),
+    ) +
+    card(
+      "<h3>Automatische e-mailmeldingen</h3><p>Vervallen materiaal en lege bruikbare voorraad worden aan alle actieve beheerders gemeld zodra de maildienst is geactiveerd. Een hulpvraag is ook zichtbaar in het beheerdersoverzicht.</p>" +
+        `<p>Verzonden: ${m.sent || 0} · In wachtrij: ${m.pending || 0} · Mislukt: ${m.failed || 0}</p><p>Geen verzendbevestiging zichtbaar? Controleer de maildienst en de geplande taak.</p>`,
+    )
   );
 }
 function productPage() {
@@ -648,7 +735,8 @@ function inventoryPage() {
 function usePage() {
   const k = state.locations.find((x) => x.id === selectedCase);
   return (
-    "<h2>Verbruik registreren</h2>" +
+    '<h2>Verbruik registreren</h2><p class="page-intro">Kies of scan een koffer en geef daarna product en aantal in.</p>' +
+    caseSelector("use") +
     meta() +
     card(
       form(
@@ -800,6 +888,7 @@ function movePage() {
 function settingsPage() {
   return (
     "<h2>Instellingen & back-ups</h2>" +
+    supportSettings() +
     card(
       "<p>Beheer persoonlijke vrijwilligerstoegang via Gebruikersbeheer.</p>" +
         button("Gebruikersbeheer", "openUsers") +
@@ -1363,6 +1452,9 @@ document.addEventListener("click", async (e) => {
         $("userStatus").textContent = "Toegang bijgewerkt.";
         break;
       }
+      case "resolveHelp":
+        await execute("resolve_help", { id: d.id });
+        break;
       case "navigate":
         await navigate(d.page);
         break;
