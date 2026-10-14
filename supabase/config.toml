@@ -7,3 +7,7 @@ verify_jwt = false
 # Login is intentionally unauthenticated; enrolment verifies the personal JWT
 # via Auth getUser and session/membership/expiry checks in service-only SQL.
 verify_jwt = false
+[functions.material-mail]
+# Scheduled worker uses a separate secret job token, verified by handler.mjs.
+# A personal Auth JWT or public project key never authorizes mail processing.
+verify_jwt = false

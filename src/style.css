@@ -7,6 +7,79 @@
   --muted: #687386;
   --border: #e1e6ec;
 }
+/* Clear action hierarchy while retaining the department's colours. */
+.page-intro {
+  color: var(--muted);
+  max-width: 70ch;
+  margin-top: 0;
+}
+.nav-group {
+  color: #d1d8e2;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 16px 13px 5px;
+}
+.vol-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  max-width: 900px;
+}
+.vol-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  text-align: left;
+  padding: 24px;
+  min-height: 155px;
+  background: white;
+  color: var(--text);
+  border: 2px solid var(--border);
+  box-shadow: 0 3px 12px #00000008;
+}
+.vol-action:hover {
+  border-color: var(--red);
+  background: #fff6f7;
+  color: var(--text);
+}
+.vol-action strong {
+  font-size: 1.2rem;
+  color: var(--red);
+}
+.vol-action > span:last-child {
+  font-weight: 400;
+  color: var(--muted);
+}
+.action-icon {
+  font-size: 1.8rem;
+}
+.status-pill {
+  display: inline-block;
+  border-radius: 20px;
+  padding: 4px 12px;
+  background: #edf1f5;
+  font-size: 0.9rem;
+}
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid #1565c0;
+  outline-offset: 3px;
+}
+@media (max-width: 600px) {
+  .vol-actions {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .vol-action {
+    min-height: 125px;
+    padding: 18px;
+  }
+}
 * {
   box-sizing: border-box;
 }

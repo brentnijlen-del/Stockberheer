@@ -12,6 +12,229 @@ import {
 import { inventoryBackup, replenishments, alerts } from "../src/domain.js";
 before(setup);
 after(() => pool.end());
+test("volunteer portal restricts core RPC and help is private, validated, idempotent and admin-resolved", async () => {
+  await assert.rejects(
+    asUser("volunteer", "select material_private.execute($1::jsonb,$2)", [
+      JSON.stringify({ type: "inventory", payload: {} }),
+      crypto.randomUUID(),
+    ]),
+    (e) => e.code === "42501",
+  );
+  const id = crypto.randomUUID();
+  await command(
+    "volunteer",
+    "help",
+    { message: "Fictieve hulpvraag <script>" },
+    id,
+  );
+  await command(
+    "volunteer",
+    "help",
+    { message: "Fictieve hulpvraag <script>" },
+    id,
+  );
+  assert.equal((await snapshot("volunteer")).help_requests.length, 1);
+  await assert.rejects(command("volunteer", "help", { message: " " }));
+  await assert.rejects(
+    command("volunteer", "support_settings", { contact_name: "forged" }),
+    (e) => e.code === "42501",
+  );
+  await assert.rejects(
+    command("volunteer", "resolve_help", { id }),
+    (e) => e.code === "42501",
+  );
+  await command("admin", "support_settings", {
+    contact_name: "Verantwoordelijke",
+    contact_email: "contact@example.invalid",
+    contact_phone: "0123",
+  });
+  assert.equal(
+    (await snapshot("volunteer")).support.contact_name,
+    "Verantwoordelijke",
+  );
+  await command("admin", "resolve_help", { id });
+  assert.ok((await snapshot("volunteer")).help_requests[0].resolved_at);
+  for (const role of ["anon", "nonmember"])
+    await assert.rejects(command(role, "help", { message: "forged" }));
+});
+test("mail queue is service-only, deduplicates incidents, retries leases and reopens after replenishment", async () => {
+  const f = await fixture();
+  const claim = async () =>
+    (await pool.query("select public.material_mail_claim() jobs")).rows[0].jobs;
+  for (const role of ["volunteer", "admin", "anon"])
+    await assert.rejects(
+      asUser(role, "select public.material_mail_claim()"),
+      (e) => e.code === "42501",
+    );
+  const first = await claim();
+  const empty = first.find((j) => j.payload.kind === "empty");
+  assert.ok(empty);
+  assert.equal(empty.email, "admin@example.invalid");
+  assert.equal((await claim()).length, 0);
+  assert.equal(
+    (
+      await pool.query("select public.material_mail_finish($1,$2,true,$3) ok", [
+        empty.id,
+        crypto.randomUUID(),
+        "bad",
+      ])
+    ).rows[0].ok,
+    false,
+  );
+  assert.equal(
+    (
+      await pool.query("select public.material_mail_finish($1,$2,true,$3) ok", [
+        empty.id,
+        empty.lease,
+        "provider",
+      ])
+    ).rows[0].ok,
+    true,
+  );
+  assert.equal((await claim()).length, 0);
+  await command("admin", "receive", {
+    location_id: f.location,
+    product_id: f.product,
+    quantity: 2,
+    batch: "valid",
+  });
+  await claim();
+  await command("volunteer", "consume", {
+    location_id: f.location,
+    product_id: f.product,
+    quantity: 2,
+  });
+  const reopened = (await claim()).find((j) => j.payload.kind === "empty");
+  assert.ok(reopened);
+  assert.notEqual(reopened.id, empty.id);
+  await command("admin", "receive", {
+    location_id: f.location,
+    product_id: f.product,
+    quantity: 1,
+    batch: "expired",
+    expiry: "2000-01-01",
+  });
+  const expiry = (await claim()).find((j) => j.payload.kind === "expired");
+  assert.ok(expiry);
+  assert.equal((await claim()).length, 0);
+  await pool.query(
+    "update material_private.mail_outbox set next_attempt=now()-interval '1 second' where id=$1",
+    [expiry.id],
+  );
+  const retry = (await claim()).find((j) => j.id === expiry.id);
+  assert.ok(retry);
+  assert.notEqual(retry.lease, expiry.lease);
+  assert.equal(
+    (
+      await pool.query("select public.material_mail_finish($1,$2,true,$3) ok", [
+        expiry.id,
+        expiry.lease,
+        "late",
+      ])
+    ).rows[0].ok,
+    false,
+  );
+  await pool.query(
+    "delete from material_private.mail_outbox where id is not null",
+  );
+  await pool.query(
+    "delete from material_private.mail_incidents where key is not null",
+  );
+});
+test("mail leases are atomic across workers, respect current admins, date bounds and provider retry window", async () => {
+  const f = await fixture();
+  const claim = async () => {
+    const c = await pool.connect();
+    try {
+      await c.query("begin");
+      await c.query("set local role service_role");
+      const r = await c.query("select public.material_mail_claim() jobs");
+      await c.query("commit");
+      return r.rows[0].jobs;
+    } catch (e) {
+      await c.query("rollback");
+      throw e;
+    } finally {
+      c.release();
+    }
+  };
+  await pool.query(
+    "insert into material_private.members(user_id,role) values($1,'admin')",
+    [IDS.nonmember],
+  );
+  const parallel = await Promise.all([claim(), claim()]);
+  const jobs = parallel.flat();
+  assert.equal(new Set(jobs.map((j) => j.id)).size, jobs.length);
+  assert.ok(jobs.some((j) => j.email === "nonmember@example.invalid"));
+  await pool.query(
+    "update material_private.members set status='blocked' where user_id=$1",
+    [IDS.nonmember],
+  );
+  await claim();
+  assert.equal(
+    (
+      await pool.query(
+        "select count(*)::int n from material_private.mail_outbox where recipient=$1 and status in ('pending','sending')",
+        [IDS.nonmember],
+      )
+    ).rows[0].n,
+    0,
+  );
+  const first = jobs.find((j) => j.email === "admin@example.invalid");
+  await pool.query(
+    "update material_private.mail_outbox set first_attempt=now()-interval '24 hours',next_attempt=now()-interval '1 second' where id=$1",
+    [first.id],
+  );
+  assert.ok(!(await claim()).some((j) => j.id === first.id));
+  assert.equal(
+    (
+      await pool.query(
+        "select status from material_private.mail_outbox where id=$1",
+        [first.id],
+      )
+    ).rows[0].status,
+    "failed",
+  );
+  const today = (
+    await pool.query(
+      "select (now() at time zone 'Europe/Brussels')::date::text local_day",
+    )
+  ).rows[0].local_day;
+  await command("admin", "receive", {
+    location_id: f.location,
+    product_id: f.product,
+    quantity: 1,
+    batch: "today",
+    expiry: today,
+  });
+  assert.ok(
+    !(await claim()).some(
+      (j) => j.payload.kind === "expired" && j.payload.batch === "today",
+    ),
+  );
+  await command("admin", "help", { message: "Private administrator question" });
+  assert.ok(
+    !(await snapshot("volunteer")).help_requests.some(
+      (h) => h.message === "Private administrator question",
+    ),
+  );
+  const help = (await claim()).find((j) => j.payload.kind === "help");
+  assert.ok(help);
+  await pool.query(
+    "delete from material_private.mail_outbox where id is not null",
+  );
+  await pool.query(
+    "delete from material_private.mail_incidents where key is not null",
+  );
+  const requests = (await snapshot()).help_requests.filter(
+    (h) => !h.resolved_at,
+  );
+  for (const h of requests)
+    await command("admin", "resolve_help", { id: h.id });
+  await pool.query("delete from material_private.members where user_id=$1", [
+    IDS.nonmember,
+  ]);
+});
 test("anonymous and nonmember cannot read or write; member roles are server-derived", async () => {
   for (const role of ["anon", "nonmember"]) {
     await assert.rejects(snapshot(role));
@@ -177,7 +400,7 @@ test("inventory adjusts per lot and rejects stale, negative or cross-location co
   const lots = (await snapshot()).lots.filter(
     (x) => x.product_id === f.product,
   );
-  await command("volunteer", "inventory", {
+  await command("admin", "inventory", {
     location_id: f.location,
     reason: "Telling",
     lots: lots.map((x, i) => ({
@@ -195,21 +418,21 @@ test("inventory adjusts per lot and rejects stale, negative or cross-location co
   );
   assert.equal(new Set(next.map((x) => x.expiry)).size, 2);
   await assert.rejects(
-    command("volunteer", "inventory", {
+    command("admin", "inventory", {
       location_id: f.location,
       reason: "stale",
       lots: lots.map((x) => ({ id: x.id, version: x.version, quantity: 1 })),
     }),
   );
   await assert.rejects(
-    command("volunteer", "inventory", {
+    command("admin", "inventory", {
       location_id: crypto.randomUUID(),
       reason: "bad",
       lots: [{ id: next[0].id, version: next[0].version, quantity: 1 }],
     }),
   );
   await assert.rejects(
-    command("volunteer", "inventory", {
+    command("admin", "inventory", {
       location_id: f.location,
       reason: "bad",
       lots: [{ id: next[0].id, version: next[0].version, quantity: -1 }],
@@ -292,14 +515,14 @@ test("loan allocations and partial returns preserve lot identities and redact pe
     (await snapshot("volunteer")).loans.find((x) => x.id === loan.id).who,
     "Andere vrijwilliger",
   );
-  await command("volunteer", "return", { loan_id: loan.id, quantity: 1 });
+  await command("admin", "return", { loan_id: loan.id, quantity: 1 });
   s = await snapshot();
   assert.equal(s.lots.find((x) => x.id === lot.id).quantity, 3);
   assert.equal(s.loan_lines.find((x) => x.loan_id === loan.id).returned, 1);
   await assert.rejects(
-    command("volunteer", "return", { loan_id: loan.id, quantity: 4 }),
+    command("admin", "return", { loan_id: loan.id, quantity: 4 }),
   );
-  await command("volunteer", "return", { loan_id: loan.id, quantity: 3 });
+  await command("admin", "return", { loan_id: loan.id, quantity: 3 });
   assert.equal(
     (await snapshot()).lots.find((x) => x.id === lot.id).quantity,
     6,
@@ -514,6 +737,11 @@ test("all private relations use RLS, privileged helper access is closed, and SQL
 });
 test("volunteers cannot invoke any administrative command or submit forged role claims", async () => {
   for (const type of [
+    "inventory",
+    "loan",
+    "return",
+    "support_settings",
+    "resolve_help",
     "catalog",
     "archive",
     "target",
@@ -541,7 +769,7 @@ test("failed multi-lot corrections roll back every preceding change", async () =
     (x) => x.product_id === f.product,
   );
   await assert.rejects(
-    command("volunteer", "inventory", {
+    command("admin", "inventory", {
       location_id: f.location,
       reason: "atomic check",
       lots: [
@@ -1084,12 +1312,16 @@ test("new volunteer invitation, duplicate/expiry/resend and acceptance grant onl
       payload.lots = (await snapshot()).lots
         .filter((x) => x.product_id === f.product)
         .map((x) => ({ id: x.id, version: x.version, quantity: x.quantity }));
-    await invitedUser(
-      user,
-      session,
-      "select public.material_command($1::jsonb,$2)",
-      [JSON.stringify({ type, payload }), crypto.randomUUID()],
-    );
+    const result = () =>
+      invitedUser(
+        user,
+        session,
+        "select public.material_command($1::jsonb,$2)",
+        [JSON.stringify({ type, payload }), crypto.randomUUID()],
+      );
+    if (type === "inventory")
+      await assert.rejects(result(), (e) => e.code === "42501");
+    else await result();
   }
   await assert.rejects(
     invitedUser(user, session, "select public.material_command($1::jsonb,$2)", [

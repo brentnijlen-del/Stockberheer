@@ -16,6 +16,50 @@ const nav = async (page, title) => {
 test.beforeEach(async ({ request }) => {
   await request.post("http://127.0.0.1:8040/_test/reset");
 });
+test("volunteer has four actions; help and contact settings work at mobile and desktop widths", async ({
+  page,
+  browser,
+}) => {
+  await login(page);
+  await nav(page, "Instellingen");
+  await page.locator('[name="contact_name"]').fill("Verantwoordelijke Nijlen");
+  await page.locator('[name="contact_email"]').fill("contact@example.invalid");
+  await page
+    .getByRole("button", { name: "Contactgegevens opslaan", exact: true })
+    .click();
+  await expect(page.locator("#saveStatus")).toHaveText("Opgeslagen.");
+  const volunteer = await browser.newPage();
+  await login(volunteer, "volunteer");
+  for (const width of [320, 390, 768, 1440]) {
+    await volunteer.setViewportSize({ width, height: 900 });
+    await expect(volunteer.locator(".vol-action")).toHaveCount(4);
+    expect(
+      await volunteer.evaluate(() => document.documentElement.scrollWidth),
+    ).toBeLessThanOrEqual(width);
+  }
+  await nav(volunteer, "❓ Hulp");
+  await expect(volunteer.locator("#content")).toContainText(
+    "Verantwoordelijke Nijlen",
+  );
+  await volunteer
+    .locator('[name="message"]')
+    .fill("Fictieve hulpvraag <script>alert(1)</script>");
+  await volunteer
+    .getByRole("button", { name: "Hulpvraag doorgeven", exact: true })
+    .click();
+  await expect(volunteer.locator("#content")).toContainText(
+    "Wacht op beheerder",
+  );
+  await nav(page, "🏠 Overzicht");
+  await page.reload();
+  await login(page); // fetch a fresh snapshot, without waiting for background sync
+  await expect(page.locator("#content")).toContainText("Fictieve hulpvraag");
+  await page
+    .getByRole("button", { name: "Hulpvraag verwerkt", exact: true })
+    .click();
+  await expect(page.locator("#saveStatus")).toHaveText("Opgeslagen.");
+  await volunteer.close();
+});
 test("anonymous login isolation, nonmember rejection and volunteer permissions", async ({
   page,
 }) => {
@@ -33,8 +77,13 @@ test("anonymous login isolation, nonmember rejection and volunteer permissions",
   await expect(page.locator("#nav")).not.toContainText(
     "Producten & categorieën",
   );
-  await nav(page, "📷 Scanner");
-  await expect(page.locator("#content h2")).toHaveText("Scanner");
+  await expect(page.locator("#nav")).not.toContainText("Uitlenen");
+  await expect(page.locator(".vol-action")).toHaveCount(4);
+  await nav(page, "📦 Verbruik");
+  await expect(page.locator("#content h2")).toHaveText("Verbruik registreren");
+  await expect(
+    page.getByRole("button", { name: "📷 Camera" }).first(),
+  ).toBeVisible();
 });
 test("product category creation, editing and safe rendering of malicious-looking values", async ({
   page,
@@ -102,7 +151,7 @@ test("per-lot inventory, printing, shortage from consumption and replenishment",
 test("loan decrements stock and partial return restores original lot", async ({
   page,
 }) => {
-  await login(page, "volunteer");
+  await login(page);
   await nav(page, "↔️ Uitlenen");
   await page.locator('[data-command="loan"] [name="who"]').fill("Testpersoon");
   await page.locator('[data-command="loan"] [name="quantity"]').fill("3");
@@ -115,7 +164,7 @@ test("loan decrements stock and partial return restores original lot", async ({
 test("network uncertainty is visible; idempotent retry causes one stock mutation", async ({
   page,
 }) => {
-  await login(page, "volunteer");
+  await login(page);
   await nav(page, "↔️ Uitlenen");
   let lost = true;
   await page.route("**/material_command", async (route) => {
@@ -253,8 +302,8 @@ test("automatic synchronization preserves dirty lot counts and refuses a stale s
   request,
 }) => {
   await page.clock.install();
-  await login(page, "volunteer");
-  await nav(page, "Koffer controleren");
+  await login(page);
+  await nav(page, "Koffercontrole");
   await page.locator("#caseSelect").selectOption({ index: 1 });
   const field = page.locator('[name^="lot_"]').first();
   await field.fill("3");

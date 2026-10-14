@@ -1,5 +1,11 @@
 # Testresultaten — 13 oktober 2026
 
+## Aanvulling — vrijwilligersportaal en automatische mail (14 oktober 2026)
+
+Op branch `codex/duidelijk-portaal-meldingen`: 82 automatische tests en 25 Chromium-browsertests geslaagd op PostgreSQL 17 met echte pg-safeupdate. Vrijwilligers mogen voortaan alleen verbruik, tekorten en hulpvragen registreren; tellingen en uitleningen blijven getest als beheerdershandelingen. Nieuwe tests controleren hulpvraagprivacy, contactinstellingen, SQL-rechten, dubbele mailincidenten, twee gelijktijdige workers, leases, beheerderblokkering, vervaldatum vandaag, de provider-retrygrens en gesimuleerde verzend-/netwerkfouten. Zie [installatie en beperkingen](VRIJWILLIGERSPORTAAL_EN_MAIL.md). Dit is nog niet op productie geïnstalleerd; Resend is nog niet aangesloten.
+
+De eerdere teksten hieronder beschrijven historische controles vóór de inmiddels goedgekeurde v2-, gebruikersbeheer- en PIN-publicaties. De gebruiker heeft PIN-aanmelding en uitnodigingsmail nadien ook live bevestigd.
+
 **Aanvulling safeupdate:** 47 unit-/SQL-/databasetests en 12 browsertests slagen nu met de echte pg-safeupdate-module actief. Zie [de gerichte herstelbeschrijving](SAFEUPDATE-HERSTEL.md). De resultaten hieronder beschrijven de oorspronkelijke oplevering.
 
 ## Uitgevoerd
