@@ -2,3 +2,8 @@
 # The project uses ES256 signing keys. The legacy gateway verifier only supports
 # legacy JWTs; handler.mjs verifies every user token with Auth getUser instead.
 verify_jwt = false
+
+[functions.pin-auth]
+# Login is intentionally unauthenticated; enrolment verifies the personal JWT
+# via Auth getUser and session/membership/expiry checks in service-only SQL.
+verify_jwt = false

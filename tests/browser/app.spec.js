@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 const login = async (page, role = "admin") => {
   await page.goto("/");
+  await page.locator("#legacyLogin").click();
   await page.locator("#email").fill(role + "@example.invalid");
   await page.locator("#password").fill("fictional");
   await page.locator("#loginButton").click();
@@ -179,6 +180,7 @@ test("USB scans stay in shortage flow; login Enter is not intercepted", async ({
     })
   ).json();
   await page.goto("/");
+  await page.locator("#legacyLogin").click();
   await page.locator("#email").fill("volunteer@example.invalid");
   await page.locator("#password").pressSequentially("fictional", { delay: 5 });
   await page.locator("#password").press("Enter");
@@ -359,8 +361,8 @@ test("admin users screen invites a new volunteer, acceptance grants access and c
     await invited.locator("#loginError").textContent(),
   ).toBeVisible();
   expect(invited.url()).toBe("http://127.0.0.1:8000/");
-  await invited.locator("#invitePassword").fill("persoonlijk-test-wachtwoord");
-  await invited.locator("#inviteRepeat").fill("persoonlijk-test-wachtwoord");
+  await invited.locator("#invitePassword").fill("0042");
+  await invited.locator("#inviteRepeat").fill("0042");
   await invited.getByRole("button", { name: "Uitnodiging accepteren" }).click();
   await expect(
     invited.locator("#app"),
@@ -517,4 +519,189 @@ test("expired or stripped invitation redirects show an explanation and clear URL
     await expect(page.locator("#invitation")).toBeHidden();
     expect(new URL(page.url()).hash).toBe("");
   }
+});
+
+const setOwnPin = async (page, pin = "0042") => {
+  await nav(page, "Mijn account");
+  await page.locator('[data-command="setPin"] [name="pin"]').fill(pin);
+  await page.locator('[data-command="setPin"] [name="repeat"]').fill(pin);
+  await page
+    .getByRole("button", { name: "Pincode opslaan", exact: true })
+    .click();
+  await expect(page.locator("#pinStatus")).toContainText("Pincode opgeslagen");
+};
+test("existing volunteer explicitly converts to a PIN, retains zeroes and roles, and never stores the PIN on the device", async ({
+  page,
+}) => {
+  await login(page, "volunteer");
+  page.on("dialog", (d) => d.accept());
+  await setOwnPin(page, "0042");
+  await page.getByRole("button", { name: "Afmelden", exact: true }).click();
+  await page.goto("/");
+  await page.locator("#email").fill("volunteer@example.invalid");
+  await page.locator("#password").fill("0042");
+  await page.locator("#loginButton").click();
+  await expect(page.locator("#app")).toBeVisible();
+  await expect(page.locator("#mode")).toHaveText("Vrijwilligersmodus");
+  expect(
+    await page.evaluate(() => ({ ...localStorage, ...sessionStorage })),
+  ).toEqual({});
+  await page.getByRole("button", { name: "Afmelden", exact: true }).click();
+  await page.goto("/");
+  await page.locator("#legacyLogin").click();
+  await page.locator("#email").fill("volunteer@example.invalid");
+  await page.locator("#password").fill("fictional");
+  await page.locator("#loginButton").click();
+  await expect(page.locator("#loginError")).toContainText("Ongeldig account");
+});
+test("five incorrect PIN guesses trigger the server cooldown, including from another browser", async ({
+  page,
+  browser,
+}) => {
+  await login(page);
+  page.on("dialog", (d) => d.accept());
+  await setOwnPin(page, "12345678");
+  await page.getByRole("button", { name: "Afmelden", exact: true }).click();
+  await page.goto("/");
+  for (let i = 0; i < 5; i++) {
+    await page.locator("#email").fill("admin@example.invalid");
+    await page.locator("#password").fill("0042");
+    await page.locator("#loginButton").click();
+    await expect(page.locator("#loginError")).toContainText("pincode onjuist");
+    await expect(page.locator("#loginButton")).toBeEnabled();
+  }
+  const other = await browser.newPage();
+  await other.goto("/");
+  await other.locator("#email").fill("admin@example.invalid");
+  await other.locator("#password").fill("12345678");
+  await other.locator("#loginButton").click();
+  await expect(other.locator("#loginError")).toContainText("15 minuten");
+  await expect(other.locator("#app")).toBeHidden();
+  await other.close();
+});
+test("forgotten PIN uses a verified recovery link; admin replaces only their own PIN and role remains admin", async ({
+  page,
+  request,
+}) => {
+  await login(page);
+  page.on("dialog", (d) => d.accept());
+  await setOwnPin(page, "0042");
+  await page.getByRole("button", { name: "Afmelden", exact: true }).click();
+  await page.goto("/");
+  await page.locator("#email").fill("admin@example.invalid");
+  await page
+    .getByRole("button", { name: "Pincode vergeten?", exact: true })
+    .click();
+  await expect(page.locator("#loginError")).toContainText("herstelmail");
+  const link = await (
+    await request.post("http://127.0.0.1:8040/_test/pin-reset", {
+      data: { email: "admin@example.invalid" },
+    })
+  ).json();
+  await page.goto(link.url);
+  await expect(page.locator("#invitation")).toBeVisible();
+  expect(new URL(page.url()).search).toBe("");
+  expect(new URL(page.url()).hash).toBe("");
+  await page.locator("#invitePassword").fill("87654321");
+  await page.locator("#inviteRepeat").fill("87654321");
+  await page.locator("#acceptInvitation").click();
+  await expect(page.locator("#app")).toBeVisible();
+  await expect(page.locator("#mode")).toHaveText("Beheerdersmodus");
+  await page.getByRole("button", { name: "Afmelden", exact: true }).click();
+  await page.goto("/");
+  await page.locator("#email").fill("admin@example.invalid");
+  await page.locator("#password").fill("87654321");
+  await page.locator("#loginButton").click();
+  await expect(page.locator("#app")).toBeVisible();
+});
+
+test("invitation activation can retry a lost answer without setting the PIN or accepting twice", async ({
+  page,
+  request,
+}) => {
+  await login(page);
+  await nav(page, "Instellingen");
+  await page
+    .getByRole("button", { name: "Gebruikersbeheer", exact: true })
+    .click();
+  await page
+    .locator('[data-command="inviteUser"] [name="email"]')
+    .fill("lost-pin@example.invalid");
+  await page.getByRole("button", { name: "Vrijwilliger uitnodigen" }).click();
+  await expect(page.locator("#userStatus")).toContainText(
+    "Uitnodiging verzonden",
+  );
+  const link = await (
+    await request.post("http://127.0.0.1:8040/_test/invitation", {
+      data: { email: "lost-pin@example.invalid" },
+    })
+  ).json();
+  await page.goto(link.url);
+  await expect(page.locator("#invitation")).toBeVisible();
+  let lost = false,
+    enrolments = 0;
+  page.on("request", (r) => {
+    if (
+      r.url().endsWith("/functions/v1/pin-auth") &&
+      r.postDataJSON()?.action === "enrol"
+    )
+      enrolments++;
+  });
+  await page.route("**/rest/v1/rpc/material_accept_invite", async (route) => {
+    if (!lost) {
+      lost = true;
+      await route.fetch();
+      await route.abort();
+    } else await route.continue();
+  });
+  await page.locator("#invitePassword").fill("0042");
+  await page.locator("#inviteRepeat").fill("0042");
+  await page.locator("#acceptInvitation").click();
+  await expect(page.locator("#inviteError")).toContainText(
+    "Pincode opgeslagen. Toegang nog niet bevestigd",
+  );
+  await expect(page.locator("#invitePassword")).toBeDisabled();
+  await page.locator("#acceptInvitation").click();
+  await expect(page.locator("#app")).toBeVisible();
+  expect(enrolments).toBe(1);
+});
+
+test("offline PIN login shows uncertainty and clears the entered PIN without creating a client session", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.route("**/functions/v1/pin-auth", (r) => r.abort());
+  await page.locator("#email").fill("admin@example.invalid");
+  await page.locator("#password").fill("0042");
+  await page.locator("#loginButton").click();
+  await expect(page.locator("#loginError")).toContainText("niet bevestigd");
+  await expect(page.locator("#password")).toHaveValue("");
+  await expect(page.locator("#app")).toBeHidden();
+});
+
+test("invitation fields wait for a delayed initial directory response rather than losing typed email", async ({
+  page,
+}) => {
+  let release;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  await page.route("**/functions/v1/user-management", async (route) => {
+    if (route.request().postDataJSON()?.action === "list") await gate;
+    await route.continue();
+  });
+  await login(page);
+  await nav(page, "Instellingen");
+  await page
+    .getByRole("button", { name: "Gebruikersbeheer", exact: true })
+    .click();
+  const input = page.locator('[data-command="inviteUser"] [name="email"]');
+  await expect(input).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Vrijwilliger uitnodigen" }),
+  ).toBeDisabled();
+  release();
+  await expect(input).toBeEnabled();
+  await input.fill("retained@example.invalid");
+  await expect(input).toHaveValue("retained@example.invalid");
 });

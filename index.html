@@ -28,35 +28,51 @@
             type="email"
             autocomplete="username"
             required
-          /><label for="password">Wachtwoord</label
+          /><label for="password" id="loginSecretLabel">Pincode</label
           ><input
             id="password"
             type="password"
             autocomplete="current-password"
+            inputmode="numeric"
+            pattern="[0-9]{4,8}"
+            minlength="4"
+            maxlength="8"
             required
           /><button id="loginButton" type="submit">Aanmelden</button>
           <p id="loginError" role="alert"></p>
         </form>
+        <button id="legacyLogin" type="button" class="secondary">
+          Aanmelden met bestaand wachtwoord
+        </button>
+        <button id="forgotPin" type="button" class="secondary">
+          Pincode vergeten?
+        </button>
       </section>
       <section id="invitation" class="card hidden">
         <h2>Welkom bij Hulpdienst Materiaalbeheer Nijlen</h2>
         <p>
-          Kies een persoonlijk wachtwoord om je vrijwilligerstoegang te
-          activeren.
+          Kies een persoonlijke pincode van 4 tot en met 8 cijfers om je toegang
+          te activeren. Bewaar de code privé.
         </p>
         <form id="invitationForm">
-          <label for="invitePassword">Nieuw wachtwoord</label
+          <label for="invitePassword">Nieuwe pincode</label
           ><input
             id="invitePassword"
             type="password"
-            minlength="12"
+            minlength="4"
+            maxlength="8"
+            inputmode="numeric"
+            pattern="[0-9]{4,8}"
             required
             autocomplete="new-password"
-          /><label for="inviteRepeat">Wachtwoord herhalen</label
+          /><label for="inviteRepeat">Pincode herhalen</label
           ><input
             id="inviteRepeat"
             type="password"
-            minlength="12"
+            minlength="4"
+            maxlength="8"
+            inputmode="numeric"
+            pattern="[0-9]{4,8}"
             required
             autocomplete="new-password"
           /><button id="acceptInvitation" type="submit">
